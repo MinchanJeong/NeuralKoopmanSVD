@@ -15,5 +15,5 @@
 
 
 ## Code Release
-The full source code and models will be released **by December 14, 2025**.  
+The full source code will be released in late December 2025.
 We are currently finalizing the documentation and cleaning up the codebase for reproducibility.
