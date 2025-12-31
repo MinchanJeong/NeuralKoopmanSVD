@@ -1,0 +1,49 @@
+# pyproject.toml
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "NeuralKoopmanSVD"
+version = "1.0.0"
+description = "Koopman Operator Analysis using Neural Networks"
+readme = "README.md"
+requires-python = ">=3.9,<3.14"
+license = {text = "MIT"}
+authors = [
+  { name = "Minchan Jeong", email = "mcjeong@kaist.ac.kr" },
+  { name = "J. Jon Ryu", email = "jongha@mit.edu" },
+  { name = "Se-Young Yun", email = "yunseyoung@kaist.ac.kr" },
+  { name = "Gregory W. Wornell", email = "gww@mit.edu" },
+]
+
+dependencies = [
+    "numpy<2.4.0", # https://github.com/scipy/scipy/issues/24215
+    "scipy>=1.13.0",
+    "numba",
+    "pytest",
+    "pandas",
+    "scikit-learn",
+    "xarray",
+    "matplotlib",
+    "tqdm",
+    "wandb",
+    "psutil",
+    "KDEpy",
+    "mdtraj",
+    "lightning>=2.4.0",
+    "schnetpack>=2.1.1",
+    "torch>=2.4.0",
+    "torchvision>=0.17.0",
+    "torchaudio>=2.2.0",
+    "ml-collections>=1.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["koopmansvd*"]
+
+[tool.codespell]
+ignore-words-list = "bu,noe,fro"
+skip = "*.ipynb"
