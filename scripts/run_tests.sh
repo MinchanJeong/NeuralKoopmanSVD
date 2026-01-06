@@ -40,7 +40,9 @@ run_test() {
 # Run Integration Tests
 run_test "Logistic" "./scripts/run_logistic.sh"
 run_test "Ordered MNIST" "./scripts/run_orderedmnist.sh"
-run_test "Molecular Dynamics" "./scripts/run_chignolin.sh"
+
+# Uncomment the chignolin test if you prepared data
+#run_test "Molecular Dynamics" "./scripts/run_chignolin.sh"
 
 echo "================================="
 echo "=== All Tests Passed! ==="

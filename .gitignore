@@ -2,6 +2,7 @@
 .ruff_cache/
 wandb/
 results/
+data/
 
 # Hydra outputs
 runs/
