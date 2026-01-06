@@ -32,6 +32,8 @@ def get_config():
                 "global_batch_size": 128,
                 "batch_size": 128,  # Per-device batch size (updated in train.py)
                 "num_workers": 4,
+                "prefetch_factor": 2,
+                "persistent_workers": True,
                 "time_lag": 1,
                 "split": (0.8, 0.2),
                 # > Synthetic Specific

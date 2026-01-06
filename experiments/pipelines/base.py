@@ -81,7 +81,7 @@ class BasePipeline(ABC):
                 return None, None
             # Pick the one with highest epoch/step just in case
             ckpt_path = sorted(ckpt_files)[-1]
-        logger.info(f"Loading checkpoint from: {ckpt_path}")    
+        logger.info(f"Loading checkpoint from: {ckpt_path}")
 
         # 2. Reconstruct Model Components via Factory
         encoder = get_encoder(self.cfg)

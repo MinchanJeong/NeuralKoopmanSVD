@@ -3,6 +3,7 @@
 import logging
 import datetime
 from pathlib import Path
+import os
 
 import torch
 import torch.distributed as dist
@@ -40,6 +41,44 @@ flags.DEFINE_string(
     None,
     "Unique run identifier (e.g., timestamp). Required for DDP consistency.",
 )
+
+
+def resolve_loader_kwargs(cfg):
+    """
+    Dynamically resolves DataLoader parameters to balance throughput and memory.
+    """
+    # 1. Resolve num_workers
+    # If set to -1, auto-scale to CPU count (capped at 8-16 to avoid overhead)
+    if cfg.data.num_workers == -1:
+        cpu_count = os.cpu_count() or 1
+        # Heuristic: usually 4 workers per GPU is sufficient.
+        # Capping at 8 or 12 prevents excessive context switching overhead.
+        cfg.data.num_workers = min(cpu_count, 12)
+
+    num_workers = cfg.data.num_workers
+
+    # 2. Resolve prefetch_factor
+    # prefetch_factor is valid ONLY if num_workers > 0
+    if num_workers > 0:
+        # Use config value, defaulting to 2 if not present
+        prefetch_factor = getattr(cfg.data, "prefetch_factor", 2)
+        persistent_workers = getattr(cfg.data, "persistent_workers", True)
+    else:
+        # Main process loading (debugging)
+        prefetch_factor = None
+        persistent_workers = False
+
+    logging.info(
+        f"DataLoader Config: Workers={num_workers}, Prefetch={prefetch_factor}, Persistent={persistent_workers}"
+    )
+
+    return {
+        "num_workers": num_workers,
+        "prefetch_factor": prefetch_factor,
+        "persistent_workers": persistent_workers,
+        "pin_memory": torch.cuda.is_available(),
+        "drop_last": True,
+    }
 
 
 # --- Main Training Execution ---
@@ -100,13 +139,10 @@ def main(_):
     # 2. Data Pipeline
     train_ds, val_ds, collate_fn = get_datasets(cfg)
 
-    loader_kwargs = {
-        "batch_size": cfg.data.batch_size,
-        "num_workers": cfg.data.num_workers,
-        "collate_fn": collate_fn,
-        "pin_memory": torch.cuda.is_available(),
-        "drop_last": True,
-    }
+    loader_kwargs = resolve_loader_kwargs(cfg)
+    loader_kwargs["batch_size"] = cfg.data.batch_size
+    loader_kwargs["collate_fn"] = collate_fn
+
     train_loader = DataLoader(train_ds, shuffle=True, **loader_kwargs)
     val_loader = DataLoader(val_ds, shuffle=False, **loader_kwargs)
 
