@@ -103,22 +103,34 @@ Append `debug` to any script to run a quick 1-epoch test.
 ./scripts/run_orderedmnist.sh debug
 ```
 
+
 ### 3. Distributed Training (Multi-GPU)
 
-This repository is built on **PyTorch Lightning**, natively supporting Distributed Data Parallel (DDP) for scalable training across multiple GPUs.
+This repository is built on **PyTorch Lightning**, supporting Distributed Data Parallel (DDP).
 
-To run experiments on multiple GPUs, simply specify the number of devices in the command line or configuration:
+**Recommended: Using Scripts (Auto-Detection)**
+Our scripts (`scripts/run_*.sh`) automatically detect the number of GPUs based on `CUDA_VISIBLE_DEVICES`. You don't need to manually set the device count.
 
 ```bash
-# Example: Train on 4 GPUs using DDP strategy
-python experiments/train.py \
+# Example: Run on 4 GPUs (IDs: 0, 1, 2, 3)
+# The script automatically sets --config.trainer.devices=4
+CUDA_VISIBLE_DEVICES=0,1,2,3 ./scripts/run_chignolin.sh
+
+# Example: Run on specific 2 GPUs
+CUDA_VISIBLE_DEVICES=0,1 ./scripts/run_chignolin.sh
+```
+
+**Manual Execution**:
+If you run `train.py` directly, you must explicitly specify the device count.
+
+```bash
+# Example: Manually running on 4 GPUs
+CUDA_VISIBLE_DEVICES=0,1,2,3 python experiments/train.py \
     --config=experiments/configs/chignolin_schnet.py \
     --config.trainer.accelerator="gpu" \
     --config.trainer.devices=4 \
     --config.trainer.strategy="ddp"
 ```
-
-Please also see demo scripts in `/scripts`.
 
 ### 4. Experiment Outputs
 
