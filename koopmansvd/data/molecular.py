@@ -5,34 +5,49 @@ from typing import Dict, Any, List
 import torch
 from koopmansvd.data.base import BaseContextDataset
 
+import ase.db
+from schnetpack.data import ASEAtomsData
+from schnetpack.transform import CastTo32, MatScipyNeighborList
+import schnetpack.properties as properties
+
 logger = logging.getLogger(__name__)
 
-try:
-    from schnetpack.data import ASEAtomsData
-    from schnetpack.transform import CastTo32, MatScipyNeighborList
-    import schnetpack.properties as properties
 
-    _HAS_SCHNET = True
-except ImportError:
-    ASEAtomsData = object  # Mock for type hinting
+# --- Fix for ASE/SchNetPack Compatibility ---
+class FixedASEAtomsData(ASEAtomsData):
+    """
+    Subclass of ASEAtomsData that fixes compatibility issues with newer ASE versions.
 
-    class properties:
-        R = "_positions"
-        Z = "_atomic_numbers"
-        idx_i = "_idx_i"
-        idx_j = "_idx_j"
-        idx_m = "_idx_m"  # Index mapping atoms to the batch index
-        n_atoms = "_n_atoms"
-        cell = "_cell"
-        offsets = "_offsets"  # PBC offsets
-        forces = "forces"
-        energy = "energy"
-        dipole_moment = "dipole_moment"
-        polarizability = "polarizability"
-        total_energy = "energy"
-        idx = "_idx"
+    Problem:
+      Newer ASE enforces strict connection management for SQLite databases.
+      Accessing 'metadata' requires an active connection (self.connection is not None).
+      SchNetPack's ASEAtomsData assumes the connection is always open after init,
+      but ASE now initializes it in a closed state or requires a context manager.
 
-    _HAS_SCHNET = False
+    Solution:
+      Override the 'metadata' property (which is called during SchNetPack's __init__).
+      If the connection is closed, manually trigger __enter__() to open it and keep it
+      open, mimicking the legacy behavior SchNetPack expects.
+    """
+
+    @property
+    def metadata(self):
+        # Check if the internal ASE database connection exists
+        if hasattr(self, "conn") and self.conn is not None:
+            # If the actual sqlite connection is None, force it open
+            if getattr(self.conn, "connection", None) is None:
+                # __enter__() is the standard ASE method to establish the DB connection
+                self.conn.__enter__()
+
+        # Proceed to access the metadata property from the parent class
+        return super().metadata
+
+    def __del__(self):
+        # Good practice to close the connection when the dataset is destroyed,
+        # although Python/OS usually handles this.
+        if hasattr(self, "conn") and self.conn is not None:
+            if getattr(self.conn, "connection", None) is not None:
+                self.conn.__exit__(None, None, None)
 
 
 def schnet_collate_fn(batch_list: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
@@ -212,9 +227,6 @@ class MolecularContextDataset(BaseContextDataset):
         cutoff: float = 6.0,
         time_lag: int = 1,
     ):
-        if not _HAS_SCHNET:
-            raise ImportError("schnetpack is required for MolecularContextDataset.")
-
         super().__init__(time_lag)
         self.db_path = Path(db_path)
         self.cutoff = cutoff
@@ -228,8 +240,8 @@ class MolecularContextDataset(BaseContextDataset):
         self.window_span = 1 + self.time_lag
 
         # Temporary connection for length calculation
-        temp_data = ASEAtomsData(str(self.db_path))
-        raw_len = len(temp_data)
+        with ase.db.connect(str(self.db_path)) as conn:
+            raw_len = len(conn)
         self._len = max(0, raw_len - self.window_span + 1)
 
         # Define transforms (to be used later)
@@ -241,7 +253,9 @@ class MolecularContextDataset(BaseContextDataset):
     def _get_dataset(self):
         """Lazy initialization of the dataset to ensure thread/process safety."""
         if self.dataset is None:
-            self.dataset = ASEAtomsData(str(self.db_path), transforms=self.transforms)
+            self.dataset = FixedASEAtomsData(
+                str(self.db_path), transforms=self.transforms
+            )
         return self.dataset
 
     def __len__(self) -> int:

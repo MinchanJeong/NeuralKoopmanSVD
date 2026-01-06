@@ -17,20 +17,11 @@ from .base import BasePipeline
 # Import Factory
 from experiments.factory import get_datasets
 
-# Conditional imports
-try:
-    import mdtraj as md
-    from ase import Atoms
-    from schnetpack.data import ASEAtomsData
-except ImportError:
-    md = None
-    Atoms = None
-    ASEAtomsData = None
-
-try:
-    import dcor
-except ImportError:
-    dcor = None
+# Import optional dependencies
+import mdtraj as md
+import ase
+from ase import Atoms
+import dcor
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +45,6 @@ class ChignolinPipeline(BasePipeline):
         self.raw_path = Path(cfg.data.raw_path)
         self.output_dir = Path(cfg.data.dataset_dir)
         self.topology_file = self.raw_path / "protein.gro"
-
-        if md is None or ASEAtomsData is None:
-            raise ImportError(
-                "Chignolin pipeline requires 'mdtraj', 'ase', 'scipy', and 'schnetpack'."
-            )
 
     def preprocess(self, overwrite: bool = False):
         """Converts raw MD trajectories (XTC/GRO) into SchNetPack databases.
@@ -154,23 +140,35 @@ class ChignolinPipeline(BasePipeline):
             db_path.unlink()
 
         logger.info(f"Creating {desc} DB at {db_path}...")
-        db_conn = ASEAtomsData.create(
-            str(db_path), distance_unit="Ang", property_unit_dict={}
-        )
 
+        # FIX: Use pure ase.db to bypass ASEAtomsData issues entirely during creation.
+        # This is more robust against version mismatches.
         total_frames = 0
-        for traj_path in tqdm(file_list, desc=f"Processing {desc}", unit="file"):
-            atoms_list = self._process_single_trajectory(traj_path, self.topology_file)
-            if atoms_list:
-                properties_list = [{} for _ in range(len(atoms_list))]
-                try:
-                    db_conn.add_systems(
-                        atoms_list=atoms_list, property_list=properties_list
+
+        try:
+            with ase.db.connect(str(db_path), append=False) as conn:
+                # 1. Write Metadata first
+                conn.metadata = {"_distance_unit": "Ang", "_property_unit_dict": {}}
+                # 2. Loop and Write
+                for traj_path in tqdm(
+                    file_list, desc=f"Processing {desc} data", unit="file"
+                ):
+                    atoms_list = self._process_single_trajectory(
+                        traj_path, self.topology_file
                     )
-                    total_frames += len(atoms_list)
-                except Exception as e:
-                    logger.error(f"Failed to add system from {traj_path.name}: {e}")
-        logger.info(f"Finished {desc}. Total frames: {total_frames}")
+                    for atoms in atoms_list:
+                        # Direct write to SQLite
+                        conn.write(atoms)
+                        total_frames += 1
+
+        except Exception as e:
+            logger.error(f"Failed to create DB: {e}")
+            # Clean up partial file
+            if db_path.exists():
+                db_path.unlink()
+            raise
+
+        logger.info(f"Finished {desc} data. Total frames: {total_frames}")
 
     @staticmethod
     def _process_single_trajectory(
@@ -266,7 +264,6 @@ class ChignolinPipeline(BasePipeline):
         # 1. Load Model & Estimator
         logger.info(f"Loading model from {run_dir}")
         pl_module, estimator = self.load_model_and_estimator(run_dir)
-
         # 2. Setup Data
         train_ds, val_ds, collate_fn = get_datasets(self.cfg)
         val_loader = DataLoader(
@@ -277,24 +274,48 @@ class ChignolinPipeline(BasePipeline):
             shuffle=False,
             pin_memory=True,
         )
+        # 3. Load Topology for RMSD calculations
+        topo_data = self._load_topology_indices()
+        # 4. Run Inference Loop
+        inference_results = self._run_inference_loop(
+            pl_module, estimator, val_loader, topo_data
+        )
+        # 5. Compute Metrics & Save Results
+        self._compute_and_save_metrics(inference_results, estimator, output_path)
 
-        # 3. Topology for RMSD
-        if md is not None:
+    def _load_topology_indices(self):
+        """Loads topology and pre-computes atom indices for RMSD."""
+        if md is None:
+            return None
+
+        try:
             topo = md.load(str(self.topology_file)).topology
-            ca_indices = topo.select("name CA")
-            n_atoms = topo.n_atoms
+            return {
+                "ca_indices": topo.select("name CA"),
+                "non_h_indices": topo.select("element != H"),
+                "n_atoms": topo.n_atoms,
+            }
+        except Exception as e:
+            logger.warning(f"Failed to load topology: {e}")
+            return None
 
-        # 4. Inference Loop
+    def _run_inference_loop(self, pl_module, estimator, loader, topo_data):
+        """Iterates over validation data to collect modes and calculate RMSDs."""
         logger.info("Running inference on validation set...")
         estimator.reset_eval()
 
         f_first_modes = []
-        rmsd_list = []
+        rmsd_ca_list = []
+        rmsd_nonh_list = []
+
+        # Determine target mode index:
+        # If centering is on, Index 0 is constant (1.0), so we want Index 1.
+        # If centering is off, the model likely learns the slowest dynamic mode at Index 0.
         target_mode_idx = 1 if self.cfg.model.centering else 0
         device = pl_module.device
 
         with torch.no_grad():
-            for batch in tqdm(val_loader, desc="Eval"):
+            for batch in tqdm(loader, desc="Eval"):
                 x, y = batch
 
                 # Move to device
@@ -311,7 +332,7 @@ class ChignolinPipeline(BasePipeline):
                 f_x = pl_module(x, lagged=False)
                 g_y = pl_module(y, lagged=True)
 
-                # Apply scaling if learned (Important for VAMP calculation)
+                # Apply Singular Value Scaling
                 if pl_module.svals is not None:
                     scale = pl_module.svals.view(1, -1).sqrt()
                     f_x = f_x * scale
@@ -320,50 +341,76 @@ class ChignolinPipeline(BasePipeline):
                 f_np = f_x.cpu().numpy()
                 g_np = g_y.cpu().numpy()
 
-                # Accumulate Stats for VAMP-E
+                # Accumulate Statistics for VAMP-E
                 estimator.partial_evaluate(f_np, g_np)
 
-                # Compute RMSD & Extract Mode 1
-                if md is not None:
-                    pos_tensor = x.get("_positions", x.get("R"))
-                    if pos_tensor is not None:
-                        try:
-                            pos_np = (
-                                pos_tensor.cpu()
-                                .numpy()
-                                .reshape(f_x.shape[0], n_atoms, 3)
-                            )
-                            pos_ca = pos_np[:, ca_indices, :]
-                            diff = pos_ca - pos_ca.mean(axis=1, keepdims=True)
-                            batch_rmsds = np.sqrt(
-                                np.mean(np.sum(diff**2, axis=2), axis=1)
-                            )
-                            rmsd_list.append(batch_rmsds)
-                        except Exception:
-                            pass
-
-                # Project to aligned basis for correlation analysis
+                # Collect Target Mode
                 if estimator.use_cca:
+                    # Project to canonical basis
                     phi = f_np @ estimator.alignments["f"].T
                 else:
                     phi = f_np
+
                 f_first_modes.append(phi[:, target_mode_idx])
 
-        # 5. Compute Metrics
-        scores = estimator.evaluate()  # Computes VAMP-2 and VAMP-E using Training Sigma
+                # Calculate RMSDs
+                if topo_data:
+                    self._compute_batch_rmsd(
+                        x, f_x.shape[0], topo_data, rmsd_ca_list, rmsd_nonh_list
+                    )
+
+        return {
+            "f_first_modes": np.concatenate(f_first_modes) if f_first_modes else None,
+            "rmsd_ca": np.concatenate(rmsd_ca_list) if rmsd_ca_list else None,
+            "rmsd_nonh": np.concatenate(rmsd_nonh_list) if rmsd_nonh_list else None,
+        }
+
+    def _compute_batch_rmsd(self, x, batch_size, topo_data, ca_list, nonh_list):
+        """Computes self-centroid RMSD for a batch."""
+        pos_tensor = x.get("_positions", x.get("R"))
+        if pos_tensor is None:
+            return
+
+        try:
+            n_atoms = topo_data["n_atoms"]
+            pos_np = pos_tensor.cpu().numpy().reshape(batch_size, n_atoms, 3)
+
+            # 1. C-alpha RMSD
+            ca_idx = topo_data["ca_indices"]
+            pos_ca = pos_np[:, ca_idx, :]
+            diff_ca = pos_ca - pos_ca.mean(axis=1, keepdims=True)
+            rmsd_ca = np.sqrt(np.mean(np.sum(diff_ca**2, axis=2), axis=1))
+            ca_list.append(rmsd_ca)
+
+            # 2. Non-Hydrogen RMSD
+            nonh_idx = topo_data["non_h_indices"]
+            pos_nonh = pos_np[:, nonh_idx, :]
+            diff_nonh = pos_nonh - pos_nonh.mean(axis=1, keepdims=True)
+            rmsd_nonh = np.sqrt(np.mean(np.sum(diff_nonh**2, axis=2), axis=1))
+            nonh_list.append(rmsd_nonh)
+
+        except Exception as e:
+            logger.warning(f"RMSD computation skipped for batch: {e}")
+
+    def _compute_and_save_metrics(self, results, estimator, output_path):
+        """Computes scores, timescales, correlations, and saves summary data."""
+        # 1. Basic Scores (VAMP-2, VAMP-E)
+        scores = estimator.evaluate()
         logger.info(f"Validation Scores: {scores}")
 
+        # 2. Eigenvalues & Timescales
         eigenvalues = None
         timescales = None
-
         try:
             eigenvalues = estimator.eig()
             valid_mask = np.abs(eigenvalues) > 1e-10
             valid_eigs = np.abs(eigenvalues[valid_mask])
 
-            # Sort and select
-            start_idx = 1 if self.cfg.model.centering else 0
+            # Sort descending
             sorted_eigs = np.sort(valid_eigs)[::-1]
+
+            # Identify indices for dynamics (exclude index 0 if centering=True)
+            start_idx = 1 if self.cfg.model.centering else 0
             target_eigs = sorted_eigs[start_idx:]
 
             # Timescale: t = -lag / ln|lambda|
@@ -375,41 +422,96 @@ class ChignolinPipeline(BasePipeline):
         except Exception as e:
             logger.warning(f"Timescale computation failed: {e}")
 
-        # 6. Save & Plot
-        if rmsd_list and f_first_modes:
-            full_rmsd = np.concatenate(rmsd_list)
-            full_phi1 = np.concatenate(f_first_modes)
+        # 3. Gram Matrices (Train & Test)
+        # Test Set Gram Matrix (Accumulated during inference loop)
+        if estimator._eval_n > 0:
+            eval_M_f = estimator._eval_accum["M_f_rho0"] / estimator._eval_n
+            eval_M_g = estimator._eval_accum["M_g_rho1"] / estimator._eval_n
+        else:
+            eval_M_f = None
+            eval_M_g = None
 
+        # Train Set Gram Matrix (Directly from Estimator stats)
+        # Estimator.stats["raw"] is a NamedTuple (OperatorStats)
+        train_stats = estimator.stats.get("raw")
+        if train_stats is not None:
+            train_M_f = train_stats.M_f
+            train_M_g = train_stats.M_g
+        else:
+            train_M_f = None
+            train_M_g = None
+
+        # 4. Correlations
+        # Rename for clarity: This is the first DYNAMIC mode (phi_2 if centered)
+        first_nontrivial_phi = results["f_first_modes"]
+        rmsd_ca = results["rmsd_ca"]
+        rmsd_nonh = results["rmsd_nonh"]
+
+        if first_nontrivial_phi is not None and rmsd_ca is not None:
             if dcor is not None:
-                scores["dist_corr_ca"] = float(
-                    dcor.distance_correlation(full_phi1, full_rmsd)
+                # Compute distance correlations
+                dcor_ca = float(
+                    dcor.distance_correlation(first_nontrivial_phi, rmsd_ca)
                 )
-                logger.info(f"Distance Correlation: {scores['dist_corr_ca']:.4f}")
+                dcor_nonh = float(
+                    dcor.distance_correlation(first_nontrivial_phi, rmsd_nonh)
+                )
 
-            np.savez(
-                output_path / "analysis_data.npz",
-                rmsd=full_rmsd,
-                phi1=full_phi1,
-                eigenvalues=eigenvalues,
-                timescales=timescales,
+                # Add to scores for metrics.json
+                scores["dcor_ca"] = dcor_ca
+                scores["dcor_nonh"] = dcor_nonh
+
+                logger.info(f"DistCorr (Ca): {dcor_ca:.4f}")
+                logger.info(f"DistCorr (Non-H): {dcor_nonh:.4f}")
+
+            # 5. Save Analysis Data (Summary Only)
+            save_dict = {
+                "eigenvalues": eigenvalues,
+                "timescales": timescales,
+                # Save computed dcor values as scalars
+                "dcor_ca": scores.get("dcor_ca", np.nan),
+                "dcor_nonh": scores.get("dcor_nonh", np.nan),
+            }
+
+            # Save Gram Matrices
+            if eval_M_f is not None:
+                save_dict["gram_f_val"] = eval_M_f
+                save_dict["gram_g_val"] = eval_M_g
+            if train_M_f is not None:
+                save_dict["gram_f_train"] = train_M_f
+                save_dict["gram_g_train"] = train_M_g
+
+            np.savez(output_path / "analysis_data.npz", **save_dict)
+
+            # 6. Plots (Use in-memory data)
+            self._plot_correlation(
+                rmsd_ca,
+                first_nontrivial_phi,
+                output_path / "correlation_ca.png",
+                "Ca RMSD vs First Non-trivial Mode",
             )
             self._plot_correlation(
-                full_rmsd, full_phi1, output_path / "correlation.png"
+                rmsd_nonh,
+                first_nontrivial_phi,
+                output_path / "correlation_nonh.png",
+                "Non-H RMSD vs First Non-trivial Mode",
             )
-
-        with open(output_path / "metrics.json", "w") as f:
-            json.dump(scores, f, indent=4)
 
         if timescales is not None:
             self._plot_timescales(timescales, output_path / "timescales.pdf")
 
-        # Plot Orthogonality using accumulated test stats
-        eval_M_f = estimator._eval_accum["M_f_rho0"]
-        eval_M_g = estimator._eval_accum["M_g_rho1"]
-        if eval_M_f is not None:
+        if eval_M_f is not None and train_M_f is not None:
             self._plot_orthogonality(
-                eval_M_f, eval_M_g, output_path / "orthogonality.pdf"
+                train_M_f,
+                train_M_g,
+                eval_M_f,
+                eval_M_g,
+                output_path / "orthogonality.pdf",
             )
+
+        # Save Metrics JSON
+        with open(output_path / "metrics.json", "w") as f:
+            json.dump(scores, f, indent=4)
 
     def _plot_timescales(self, timescales, save_path):
         fig, ax = plt.subplots(figsize=(5, 4))
@@ -424,56 +526,62 @@ class ChignolinPipeline(BasePipeline):
             label="Ours",
         )
         ax.set_title("Estimated Timescale", fontsize=16)
-        ax.set_xlabel("absolute eigenvalue index", fontsize=13)
-        ax.set_ylabel("timescale (ns)", fontsize=13)
+        ax.set_xlabel("Mode Index", fontsize=13)
+        ax.set_ylabel("Timescale (ns)", fontsize=13)
         ax.set_yscale("log")
         ax.set_ylim(0.005, 200)
         ax.set_xlim(0, 15)
-        xticks = np.arange(1, len(timescales) + 1, 2)
-        ax.set_xticks(xticks)
-        ax.set_xticklabels(xticks, fontsize=13)
-        ax.tick_params(axis="y", labelsize=13)
-        lag_time_ns = 0.1 * self.cfg.data.time_lag
-        ax.hlines(lag_time_ns, 0, 16, color="k", linestyle="--", linewidth=1.5)
         ax.grid(True, linestyle="-", alpha=0.8)
         plt.tight_layout()
         plt.savefig(save_path)
         plt.close()
 
-    def _plot_orthogonality(self, M_f, M_g, save_path):
+    def _plot_orthogonality(self, M_f_train, M_g_train, M_f_val, M_g_val, save_path):
         def to_corr(M):
             d = np.diag(M)
+            d[d < 1e-12] = 1.0
             inv_sqrt = 1.0 / np.sqrt(d)
-            inv_sqrt[np.isinf(inv_sqrt)] = 0.0
             D = np.diag(inv_sqrt)
             return D @ M @ D
 
-        fig = plt.figure(figsize=(7, 3))
-        gs = gridspec.GridSpec(1, 3, width_ratios=[1, 1, 0.08], wspace=0.2)
-        ax_f = fig.add_subplot(gs[0, 0])
-        ax_f.imshow(to_corr(M_f), cmap="bwr", vmin=-1, vmax=1)
-        ax_f.set_title(r"$\mathbf{f}$", fontsize=14)
-        ax_f.set_xticks([])
-        ax_f.set_yticks([])
+        fig = plt.figure(figsize=(7, 6))
+        gs = gridspec.GridSpec(2, 3, width_ratios=[1, 1, 0.08], wspace=0.2, hspace=0.3)
 
-        ax_g = fig.add_subplot(gs[0, 1])
-        im = ax_g.imshow(to_corr(M_g), cmap="bwr", vmin=-1, vmax=1)
-        ax_g.set_title(r"$\mathbf{g}$", fontsize=14)
-        ax_g.set_xticks([])
-        ax_g.set_yticks([])
+        # Row 1: Train
+        for i, (M, label) in enumerate(
+            [(M_f_train, r"Train $\mathbf{f}$"), (M_g_train, r"Train $\mathbf{g}$")]
+        ):
+            ax = fig.add_subplot(gs[0, i])
+            im = ax.imshow(to_corr(M), cmap="bwr", vmin=-1, vmax=1)
+            ax.set_title(label, fontsize=14)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            if i == 1:
+                plt.colorbar(im, cax=fig.add_subplot(gs[0, 2]))
 
-        cax = fig.add_subplot(gs[0, 2])
-        fig.colorbar(im, cax=cax)
+        # Row 2: Test
+        for i, (M, label) in enumerate(
+            [(M_f_val, r"Test $\mathbf{f}$"), (M_g_val, r"Test $\mathbf{g}$")]
+        ):
+            ax = fig.add_subplot(gs[1, i])
+            im = ax.imshow(to_corr(M), cmap="bwr", vmin=-1, vmax=1)
+            ax.set_title(label, fontsize=14)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            if i == 1:
+                plt.colorbar(im, cax=fig.add_subplot(gs[1, 2]))
+
+        plt.suptitle("Orthogonality of Basis Functions", fontsize=16)
         plt.tight_layout()
         plt.savefig(save_path, dpi=300)
         plt.close()
 
-    def _plot_correlation(self, rmsd, phi1, save_path):
+    def _plot_correlation(self, rmsd, phi, save_path, title):
         plt.figure(figsize=(6, 5))
-        plt.scatter(rmsd, phi1, alpha=0.1, s=1, c="tab:blue")
+        plt.scatter(rmsd, phi, alpha=0.1, s=1, c="tab:blue")
         plt.xlabel("RMSD (Å)", fontsize=12)
-        plt.ylabel(r"First Eigenmode ($\phi_1$)", fontsize=12)
-        plt.title("Correlation: Structure vs Dynamics", fontsize=14)
+        plt.ylabel(r"First Non-Trivial Mode ($\phi$)", fontsize=12)
+        plt.title(title, fontsize=14)
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.savefig(save_path, dpi=300)

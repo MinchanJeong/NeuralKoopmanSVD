@@ -24,6 +24,8 @@ def get_config():
     config.data.mode = "full"
     config.data.train_db_path = ""  # Constructed dynamically in pipeline
     config.data.val_db_path = ""  # Constructed dynamically in pipeline
+    config.data.num_workers = 8
+    config.data.prefetch_factor = 4
 
     config.data.global_batch_size = 384
     config.data.time_lag = 1
