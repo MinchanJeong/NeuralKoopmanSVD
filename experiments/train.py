@@ -202,7 +202,7 @@ def main(_):
         dirpath=run_dir / "checkpoints",
         filename="epoch-{epoch:03d}-step-{step}",
         save_top_k=1,
-        monitor="val/vamp_e_score",
+        monitor="val/vamp_e",
         mode="max",
         save_last=True,
     )

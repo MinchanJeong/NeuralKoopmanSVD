@@ -129,7 +129,7 @@ class KoopmanPLModule(L.LightningModule):
 
         # Log VAMP-2 Score for Training Convergence Monitoring
         self.log(
-            "train/vamp_2_score",
+            "train/vamp_2",
             self.train_metric,
             on_step=False,
             on_epoch=True,
@@ -215,13 +215,24 @@ class KoopmanPLModule(L.LightningModule):
         # Update Metric with f, g
         self.val_metric.update(f_x, g_y)
 
-        self.log(
-            "val/vamp_e_score",
-            self.val_metric,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-        )
+    def on_validation_epoch_end(self):
+        """
+        Manually handle validation metric logging because compute() returns a Dict.
+        """
+        # compute() returns {'vamp_e': ..., 'vamp_2': ...}
+        scores = self.val_metric.compute()
+
+        # val/vamp_e, val/vamp_2
+        if isinstance(scores, dict):
+            log_scores = {f"val/{k}": v for k, v in scores.items()}
+            self.log_dict(log_scores, on_step=False, on_epoch=True, prog_bar=True)
+        else:
+            # Fallback
+            self.log(
+                "val/vamp_2_naive", scores, on_step=False, on_epoch=True, prog_bar=True
+            )
+
+        self.val_metric.reset()
 
     def configure_optimizers(self):
         return self.optimizer_cls(self.parameters(), **self.optimizer_kwargs)
