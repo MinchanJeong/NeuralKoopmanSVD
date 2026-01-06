@@ -68,12 +68,20 @@ class BasePipeline(ABC):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # 1. Find Checkpoint
-        ckpt_files = list((run_dir / "checkpoints").glob("*.ckpt"))
-        if not ckpt_files:
-            logger.error(f"No checkpoint found in {run_dir}/checkpoints")
-            return None, None
-        ckpt_path = ckpt_files[0]
-        logger.info(f"Loading checkpoint from: {ckpt_path}")
+        ckpt_dir = run_dir / "checkpoints"
+        last_ckpt = ckpt_dir / "last.ckpt"
+
+        if last_ckpt.exists():
+            ckpt_path = last_ckpt
+        else:
+            # Fallback to any checkpoint if last.ckpt is missing
+            ckpt_files = list(ckpt_dir.glob("*.ckpt"))
+            if not ckpt_files:
+                logger.error(f"No checkpoint found in {ckpt_dir}")
+                return None, None
+            # Pick the one with highest epoch/step just in case
+            ckpt_path = sorted(ckpt_files)[-1]
+        logger.info(f"Loading checkpoint from: {ckpt_path}")    
 
         # 2. Reconstruct Model Components via Factory
         encoder = get_encoder(self.cfg)
@@ -86,7 +94,7 @@ class BasePipeline(ABC):
             model = get_lightning_module(self.cfg, encoder, lagged_encoder, loss_fn)
 
             # Load state dict
-            checkpoint = torch.load(ckpt_path, map_location=device)
+            checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
             model.load_state_dict(checkpoint["state_dict"])
 
             # Explicitly move model to device and set to eval mode
