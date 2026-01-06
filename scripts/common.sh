@@ -1,28 +1,40 @@
 #!/bin/bash
 # scripts/common.sh
 
-# 1. Source .env
+# Source .env
 if [ -f .env ]; then
     echo "Loading environment variables from .env"
     set -a; source .env; set +a
 fi
 
-# 2. Python Path
 export PYTHONPATH="${PYTHONPATH}:$PWD"
 
-# 3. Defaults
+# Defaults
 DATA_DIR=${DATA_DIR:-"./data"}
 RESULT_DIR=${RESULT_DIR:-"./results"}
 PROJECT_NAME="KoopmanSVD"
 
-# 4. Cleanup
+# Auto-detect NUM_GPUS if not set
+if [ -z "${NUM_GPUS}" ]; then
+    if [ -n "${CUDA_VISIBLE_DEVICES}" ]; then
+        # Count the number of GPUs specified in CUDA_VISIBLE_DEVICES
+        NUM_GPUS=$(echo "${CUDA_VISIBLE_DEVICES}" | tr ',' ' ' | wc -w)
+        # Trim whitespace
+        NUM_GPUS=$(echo $NUM_GPUS | xargs)
+    else
+        NUM_GPUS=1
+    fi
+    echo ">>>> Auto-detected NUM_GPUS=${NUM_GPUS} from CUDA_VISIBLE_DEVICES='${CUDA_VISIBLE_DEVICES}'"
+fi
+
+# Cleanup
 find . -type d -name "__pycache__" -exec rm -r {} + 2>/dev/null || true
 
-# 5. Generate Run ID
+# Generate Run ID
 RUN_ID_BASE="$(date +"%Y%m%d-%H%M%S")"
 
-# 6. Debug Flag Handler
-# Usage: source scripts/common.sh [debug]
+# Debug Flag Handler
+# Usage: source scripts/common.sh debug
 DEBUG_ARGS=""
 if [[ "$1" == "debug" ]]; then
     echo ">>>>  DEBUG MODE ENABLED <<<<"
