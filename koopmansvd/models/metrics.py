@@ -3,7 +3,7 @@ import logging
 import torch
 from torchmetrics import Metric
 import numpy as np
-
+from typing import Dict, Union
 from koopmansvd.models.inference import linalg
 
 logger = logging.getLogger(__name__)
@@ -11,30 +11,61 @@ logger = logging.getLogger(__name__)
 
 class KoopmanScoreMetric(Metric):
     r"""
-    Computes Koopman Operator approximation scores (VAMP-2 or VAMP-E) in a streaming fashion.
+    Computes VAMP-2 and VAMP-E scores using test moments and training CCA components.
 
-    This metric accumulates sufficient statistics (empirical second-moment matrices)
-    over the entire dataset (or epoch) to ensure numerical stability before calculating the score.
+    Definitions (following Table 1 of Jeong et al., 2025):
+        Let f_tilde, g_tilde be the whitened basis functions on the Test set (using Training whiteners).
+            f_tilde = (M[f]_train)^{-1/2} @ f_test
+            g_tilde = (M[g]_train)^{-1/2} @ g_test
 
-    VAMP-2 vs. VAMP-E (Wu & Noé, 2019):
-    - VAMP-2:
-      Maximizes the sum of squared singular values of the whitened Koopman operator.
-      Intuitively, this measures the amount of dynamic information captured by the model.
+        Let U, V be the singular vectors and S (Sigma) be the singular values from Training.
+            T[f_tilde, g_tilde]_train = U @ S @ V.T
 
-    - VAMP-E (VAMP-Error):
-      Measures the approximation accuracy of the fixed operator $\hat{\mathcal{K}}$*
-      (learned from training) when applied to the validation distribution.
-      It corresponds to minimizing the Hilbert-Schmidt error: || \hat{\mathcal{K}} - \mathcal{K} ||_{HS(\mathcal{D}_{val})} $$
+        We define the 'Projected Test Moments' (Unscaled correlations in training subspace):
+            C_00 = U.T @ E[f_tilde @ f_tilde.T]_test @ U  = U.T @ (W_f @ M00 @ W_f) @ U
+            C_01 = U.T @ E[f_tilde @ g_tilde.T]_test @ V  = U.T @ (W_f @ M01 @ W_g) @ V
+            C_11 = V.T @ E[g_tilde @ g_tilde.T]_test @ V  = V.T @ (W_g @ M11 @ W_g) @ V
 
-    Why VAMP-E is better for Validation:
-      Directly calculating VAMP-2 on validation data implicitly **re-fits** a new
-      operator to the validation set (optimistic bias). VAMP-E strictly evaluates
-      how well the **frozen training model** generalizes to unseen data.
+        We define the 'Aligned Singular Functions' and their Moments on the Test set:
+            phi_tilde(x)  = S^{1/2} @ U.T @ f_tilde(x)
+            psi_tilde(x') = S^{1/2} @ V.T @ g_tilde(x')
 
-    Notation (matches Section 2.3.1 of the paper):
-        M_f: \hat{M}_{\rho_0}[f] (Covariance of current state features)
-        M_g: \hat{M}_{\rho_1}[g] (Covariance of future state features)
-        T_fg: \hat{T}[f, g]     (Cross-covariance)
+            M_phi  = E[phi_tilde @ phi_tilde.T]  = S^{1/2} @ C_00 @ S^{1/2}
+            M_psi  = E[psi_tilde @ psi_tilde.T]  = S^{1/2} @ C_11 @ S^{1/2}
+            T_stat = E[phi_tilde @ psi_tilde.T]  = S^{1/2} @ C_01 @ S^{1/2}
+
+    Metrics:
+        1. (Validation) VAMP-E (VAMP-Error): Evaluates the trained Operator.
+           Measures the approximation error (Hilbert-Schmidt norm) of the *fixed* training operator
+           against the validation dynamics. It evaluates the difference between true and
+           trained Koopman operator on test data, therefore both the learned directions (U, V)
+           and the learned singular values (S).
+
+           Score = 2 * tr(T_stat) - tr(M_phi @ M_psi)
+                 = 2 * tr(S @ C_01) - tr(S @ C_00 @ S @ C_11)  (using cyclic property of trace)
+
+        2. (Validation) Projected VAMP-2 (R2 Score): Evaluates the trained Subspace.
+           Measures the quality of the *subspace* spanned by the learned features (U, V).
+
+           Due to the whitening (normalization) step in VAMP-2 calculation, this metric is
+           *invariant* to the scaling of the features. Therefore, even if the learned
+           singular values (S) from training do not match the validation timescales,
+           this score can still be high if the learned singular vectors (U, V) correctly
+           span the dominant dynamics. It effectively measures the correlation capacity
+           of the learned subspace.
+
+           Intuition: High R2 but Low VAMP-E implies the model captured the correct
+           physical shapes (reaction coordinates) but estimated incorrect timescales.
+
+           Score =  || M_phi^{-1/2} @ T_stat @ M_psi^{-1/2} ||_F^2
+                 =  || C_00^{-1/2} @ C_01 @ C_11^{-1/2} ||_F^2
+
+        3. (Training) Naive VAMP-2:
+           Condition: No reference statistics set (ref_cca is None).
+           Computes the standard VAMP-2 score using only the current training epoch statistics.
+           Score = || (M[f]_train)^{-1/2} @ E[f @ g.T]_train @ (M[g]_train)^{-1/2} ||_F^2
+           Measures the maximum potential correlation the feature extractor can capture
+           on the current training data,
     """
 
     # DDP compatible
@@ -94,26 +125,17 @@ class KoopmanScoreMetric(Metric):
         """
         self.ref_cca = cca_components
 
-    def compute(self):
+    def compute(self) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         """
-        Computes the Koopman Score based on the available context.
-
-        1. Validation Mode (VAMP-E): If `set_ref_stats` was called with training statistics.
-           Computes the operator approximation error relative to the training operator.
-           Formula: Derived from || K_train - K_val ||_HS^2
-
-        2. Training/Self-Consistent Mode (VAMP-2): If no reference stats are present.
-           Computes the standard VAMP-2 score assuming the current batch defines the operator.
-           Formula: || M_f^{-1/2} T_{fg} M_g^{-1/2} ||_F^2
-
         Returns:
-            torch.Tensor: The calculated score (scalar).
+            - Training Mode: torch.Tensor (Naive VAMP-2 scalar)
+            - Validation Mode: Dict {'val/vamp_e': ..., 'val/proj_vamp_2': ...}
         """
         if self.n_samples < 2:
             return torch.tensor(0.0, device=self.accum_M_f.device)
 
         if self.ref_cca is not None:
-            # --- [Mode 1] VAMP-E Calculation ---
+            # --- [Mode 1] VAMP-E, Projected VAMP-2 Calculation ---
             # Use numpy-based linear algebra from linalg.py for consistency with reference components
             M_f = (self.accum_M_f / self.n_samples).cpu().numpy()
             M_g = (self.accum_M_g / self.n_samples).cpu().numpy()
@@ -121,8 +143,10 @@ class KoopmanScoreMetric(Metric):
 
             scores = linalg.compute_vamp_scores(M_f, T_fg, M_g, self.ref_cca)
 
-            # Return VAMP-E (VAMP-Error score)
-            return torch.tensor(scores["vampe"], device=self.accum_M_f.device)
+            return {
+                "vamp_e": torch.tensor(scores["vampe"], device=self.accum_M_f.device),
+                "vamp_2": torch.tensor(scores["vamp2"], device=self.accum_M_f.device),
+            }
         else:
             # --- [Mode 2] VAMP-2 Calculation (Self-Consistent) ---
             logger.debug(
