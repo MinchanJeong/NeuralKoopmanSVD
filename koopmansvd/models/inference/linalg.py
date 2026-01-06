@@ -6,7 +6,7 @@ from typing import Tuple, Dict, NamedTuple
 
 
 class OperatorStats(NamedTuple):
-    """
+    r"""
     Container for empirical second-moment matrices defined in Section 2.3.1 of the paper.
     Notation matches:
         M_f: M_{rho_0}[f] (Eq. 2.3.1)
@@ -34,7 +34,7 @@ class CCAComponents(NamedTuple):
 
 
 def compute_moments(f: np.ndarray, g: np.ndarray) -> OperatorStats:
-    """
+    r"""
     Computes empirical second-moment matrices required for Koopman operator estimation.
     See Section 2.3.1.
 

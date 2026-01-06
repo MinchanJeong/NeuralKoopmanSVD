@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class KoopmanScoreMetric(Metric):
-    """
+    r"""
     Computes Koopman Operator approximation scores (VAMP-2 or VAMP-E) in a streaming fashion.
 
     This metric accumulates sufficient statistics (empirical second-moment matrices)
