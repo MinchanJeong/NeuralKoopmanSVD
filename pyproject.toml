@@ -21,8 +21,6 @@ authors = [
 dependencies = [
     "numpy<2.4.0", # https://github.com/scipy/scipy/issues/24215
     "scipy>=1.13.0",
-    "numba",
-    "pytest",
     "pandas",
     "scikit-learn",
     "xarray",
@@ -30,10 +28,11 @@ dependencies = [
     "tqdm",
     "wandb",
     "psutil",
-    "KDEpy",
     "ase",
     "mdtraj",
     "dcor",
+    "pytest",
+    "pre-commit",
     "lightning>=2.4.0",
     "schnetpack>=2.1.1",
     "torch>=2.4.0",

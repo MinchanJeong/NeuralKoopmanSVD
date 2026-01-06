@@ -208,8 +208,8 @@ def schnet_collate_fn(batch_list: List[Dict[str, Any]]) -> Dict[str, torch.Tenso
                     valid_vals = [v for v in values if v is not None]
                     collated_batch[key] = torch.cat(valid_vals, dim=0)
 
+        # F. Fallback (Strings, Lists)
         else:
-            # F. Non-Tensor Data (Strings, Lists) -> Return as List
             collated_batch[key] = values
 
     return collated_batch

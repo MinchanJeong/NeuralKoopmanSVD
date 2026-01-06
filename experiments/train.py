@@ -235,8 +235,11 @@ def main(_):
         # Determine effective rank from config
         estimator = KoopmanEstimator(rank=cfg.model.n_modes, use_cca=True)
 
-        # Use a non-shuffled loader for deterministic accumulation
-        inference_loader = DataLoader(train_ds, shuffle=False, **loader_kwargs)
+        inference_loader_kwargs = loader_kwargs.copy()
+        inference_loader_kwargs["shuffle"] = False
+        inference_loader_kwargs["drop_last"] = False
+
+        inference_loader = DataLoader(train_ds, **inference_loader_kwargs)
 
         with torch.no_grad():
             for batch in tqdm(inference_loader, desc="Estimator Accumulation"):
