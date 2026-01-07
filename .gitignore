@@ -3,6 +3,7 @@
 wandb/
 results/
 data/
+!koopmansvd/data
 
 # Hydra outputs
 runs/
