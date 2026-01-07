@@ -2,18 +2,21 @@
 import logging
 from pathlib import Path
 from typing import Dict, Any, List
+import json
+import numpy as np
 import torch
-from koopmansvd.data.base import BaseContextDataset
 
 import ase.db
 from schnetpack.data import ASEAtomsData
 from schnetpack.transform import CastTo32, MatScipyNeighborList
 import schnetpack.properties as properties
 
+from koopmansvd.data.base import BaseContextDataset
+
 logger = logging.getLogger(__name__)
 
 
-# --- Fix for ASE/SchNetPack Compatibility ---
+# --- ASE/SchNetPack Compatibility ---
 class FixedASEAtomsData(ASEAtomsData):
     """
     Subclass of ASEAtomsData that fixes compatibility issues with newer ASE versions.
@@ -239,14 +242,42 @@ class MolecularContextDataset(BaseContextDataset):
         self._len = 0
         self.window_span = 1 + self.time_lag
 
-        # Temporary connection for length calculation
-        with ase.db.connect(str(self.db_path)) as conn:
-            raw_len = len(conn)
-        self._len = max(0, raw_len - self.window_span + 1)
+        info_path = self.db_path.with_suffix(".info.json")
+        if not info_path.exists():
+            logger.warning(
+                f"No trajectory info file found: {info_path}\n"
+                "Assuming dataset length based on database entries only.\n"
+                "This may lead to issues on datasets with multiple trajectories,\n"
+                "as pair windows may cross trajectory boundaries."
+            )
+            with ase.db.connect(str(self.db_path)) as conn:
+                raw_len = len(conn)
+                self.len_ = max(0, raw_len - (1 + self.time_lag) + 1)
+
+            self.valid_indices = np.arange(self.len_)
+        else:
+            with open(info_path, "r") as f:
+                traj_lengths = json.load(f)["traj_lengths"]
+
+            # Boundary Filtering
+            valid_indices = []
+            current_start_idx = 0
+            for length in traj_lengths:
+                # Effective the final *start* index considering time_lag
+                # e.g., for a trajectory of length 100 and lag 1,
+                # valid start indices are 0 to 98 (total 99). The 99th index would cross into the next file.
+                end_idx = current_start_idx + length - time_lag
+
+                if end_idx > current_start_idx:
+                    valid_indices.append(np.arange(current_start_idx, end_idx))
+
+                current_start_idx += length
+
+            self.valid_indices = np.concatenate(valid_indices)
+            self._len = len(self.valid_indices)
 
         # Define transforms (to be used later)
         self.transforms = [CastTo32(), MatScipyNeighborList(cutoff=cutoff)]
-
         # This will hold the actual dataset instance per worker
         self.dataset = None
 
@@ -262,20 +293,13 @@ class MolecularContextDataset(BaseContextDataset):
         return self._len
 
     def __getitem__(self, idx: int) -> List[Dict[str, torch.Tensor]]:
-        """
-        Returns a list of atomic graphs: [Structure_t, Structure_{t+tau}, ...]
-        Length of list == 2
-        """
-        if idx < 0 or idx >= self._len:
-            raise IndexError(f"Index {idx} out of bounds.")
+        real_idx = self.valid_indices[idx]
 
-        # Ensure dataset is initialized for this process
         ds = self._get_dataset()
 
         window_items = []
         for i in range(2):
-            # Calculate exact frame index
-            frame_idx = idx + (i * self.time_lag)
+            frame_idx = int(real_idx + (i * self.time_lag))
             window_items.append(ds[frame_idx])
 
         return window_items

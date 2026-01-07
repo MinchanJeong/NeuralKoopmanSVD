@@ -198,6 +198,7 @@ class ChignolinPipeline(BasePipeline):
             raise RuntimeError("Failed to load topology for RMSD pre-computation.")
 
         total_frames = 0
+        traj_lengths = []
         try:
             with ase.db.connect(str(db_path), append=False) as conn:
                 conn.metadata = {
@@ -209,6 +210,10 @@ class ChignolinPipeline(BasePipeline):
                         traj_path, self.topology_file, topo_data=topo_data
                     )
 
+                    current_frames = len(pairs_list)
+                    if current_frames > 0:
+                        traj_lengths.append(current_frames)
+
                     for atoms, extra_data in pairs_list:
                         conn.write(atoms, data=extra_data)
                         total_frames += 1
@@ -218,6 +223,11 @@ class ChignolinPipeline(BasePipeline):
             if db_path.exists():
                 db_path.unlink()
             raise
+
+        info_path = db_path.with_suffix(".info.json")
+        with open(info_path, "w") as f:
+            json.dump({"traj_lengths": traj_lengths}, f, indent=4)
+
         logger.info(f"Finished {desc} data. Total frames: {total_frames}")
 
     def _load_topology_indices(self):
