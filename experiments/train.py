@@ -120,6 +120,7 @@ def main(_):
     logger.info(f"Experiment Directory: {run_dir}")
 
     L.seed_everything(cfg.seed)
+    # https://docs.pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html#torch.set_float32_matmul_precision
     torch.set_float32_matmul_precision("medium")
 
     num_devices = resolve_device_count(cfg)
@@ -219,6 +220,7 @@ def main(_):
         callbacks=[checkpoint_callback],
         logger=lightning_loggers,
         log_every_n_steps=cfg.logging.log_every_n_steps,
+        sync_batchnorm=(num_devices > 1),
     )
     trainer.fit(pl_module, train_loader, val_loader)
 

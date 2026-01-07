@@ -98,36 +98,93 @@ class KoopmanPLModule(L.LightningModule):
         return enc(x)
 
     def training_step(self, batch, batch_idx):
+        """
+        Executes a single training step.
+
+        In a DDP (Distributed Data Parallel) setting, we perform an `all_gather` operation
+        to collect features from all GPUs before calculating the loss.
+        This is crucial because objectives like LoRA, VAMP, and DPNet
+        rely on second-moment matrices (e.g., E_{x,y' ~ D_train}[f(x) g(x')^T] ),
+        which are quadratic statistics that require global batch information.
+
+        Calculating the loss on local mini-batches and averaging the results (Avg(Loss(M_local)))
+        is mathematically different from calculating the loss on the global batch (Loss(Avg(M_local))).
+        The latter (Global Batch) provides a rigorous and stable gradient estimate for
+        learning singular subspaces.
+        """
+
         # Batch is expected to be (x, y) tuple from KoopmanCollate
         x, y = batch
 
         # Forward Pass
         f_x = self(x, lagged=False)
         g_y = self(y, lagged=True)
-
-        # Loss Calculation
-        # Pass svals if available (Loss fn decides how to use it)
-        loss = self.loss_fn(f_x, g_y, svals=self.svals)
-
-        # Update Training Metric with f, g
-        # Detach to avoid double backprop through metric
-        if self.svals is not None:
-            scale = self.svals.view(1, -1).sqrt().detach()
-            self.train_metric.update(f_x.detach() * scale, g_y.detach() * scale)
-        else:
-            self.train_metric.update(f_x.detach(), g_y.detach())
-
         batch_size = f_x.shape[0]
+
+        if self.trainer.world_size > 1:
+            """
+            < Efficient Differentiable All-Gather >
+
+            - Problem with `nn.functional.all_gather`:
+            It maintains the computational graph for ALL gathered tensors. During backward(),
+            it triggers an all-to-all communication to synchronize gradients for remote samples.
+            However, for covariance-based losses (VAMP, LoRA), the gradient of the loss
+            with respect to local samples depends only on the local batch.
+
+            - Solution (The SimCLR Trick):
+            1. Gather raw data without gradients (stop-gradient).
+            2. Manually overwrite the current rank's slice with the local differentiable tensor.
+            This forces the autograd engine to backpropagate ONLY through the local batch,
+            eliminating massive redundant gradient communication.
+            """
+
+            # 1. Create placeholders
+            f_gathered = [torch.zeros_like(f_x) for _ in range(self.trainer.world_size)]
+            g_gathered = [torch.zeros_like(g_y) for _ in range(self.trainer.world_size)]
+
+            # 2. Collect values (No gradient flow here)
+            dist.all_gather(f_gathered, f_x)
+            dist.all_gather(g_gathered, g_y)
+
+            # 3. Inject local differentiable tensors into the gathered list
+            # This attaches the current GPU's computational graph to the global batch container.
+            f_gathered[self.trainer.global_rank] = f_x
+            g_gathered[self.trainer.global_rank] = g_y
+
+            # 4. Form the global batch
+            f_x_global = torch.cat(f_gathered, dim=0)
+            g_y_global = torch.cat(g_gathered, dim=0)
+
+            # Calculate loss on the global batch
+            loss_val = self.loss_fn(f_x_global, g_y_global, svals=self.svals)
+            # Scale loss by world size to account for gradient accumulation
+            loss = loss_val * self.trainer.world_size
+            batch_size *= self.trainer.world_size
+        else:
+            # Loss Calculation
+            # Pass svals if available (Loss fn decides how to use it)
+            loss_val = self.loss_fn(f_x, g_y, svals=self.svals)
+            loss = loss_val
+
         self.log(
             "train/loss",
-            loss,
+            loss_val,
             on_step=True,
             on_epoch=True,
             prog_bar=True,
             batch_size=batch_size,
         )
 
+        # Update Training Metric (Naive VAMP-2)
+        # Detach svals to avoid double backprop through metric accumulation
+        if self.svals is not None:
+            scale = self.svals.view(1, -1).sqrt().detach()
+            self.train_metric.update(f_x.detach() * scale, g_y.detach() * scale)
+        else:
+            self.train_metric.update(f_x.detach(), g_y.detach())
+
         # Log VAMP-2 Score for Training Convergence Monitoring
+        # Note: on_step=False ensures it's computed once per epoch to save SVD cost
         self.log(
             "train/vamp_2",
             self.train_metric,
@@ -153,7 +210,6 @@ class KoopmanPLModule(L.LightningModule):
                 prog_bar=False,
                 batch_size=batch_size,
             )
-
         return loss
 
     def on_train_epoch_start(self):
@@ -225,11 +281,18 @@ class KoopmanPLModule(L.LightningModule):
         # val/vamp_e, val/vamp_2
         if isinstance(scores, dict):
             log_scores = {f"val/{k}": v for k, v in scores.items()}
-            self.log_dict(log_scores, on_step=False, on_epoch=True, prog_bar=True)
+            self.log_dict(
+                log_scores, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True
+            )
         else:
             # Fallback
             self.log(
-                "val/vamp_2_naive", scores, on_step=False, on_epoch=True, prog_bar=True
+                "val/vamp_2_naive",
+                scores,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                sync_dist=True,
             )
 
         self.val_metric.reset()
