@@ -19,6 +19,7 @@ def get_config():
                 "wandb_project": "KoopmanSVD",
                 "wandb_entity": None,  # Optional: Team/User entity
                 "log_every_n_steps": 50,  # Log frequency
+                "ref_cca_max_batches": None,  # Max batches for ref loader CCA computation
             },
             # --- Data Configuration ---
             "data": {
