@@ -53,12 +53,12 @@ def resolve_loader_kwargs(cfg):
     Dynamically resolves DataLoader parameters to balance throughput and memory.
     """
     # 1. Resolve num_workers
-    # If set to -1, auto-scale to CPU count (capped at 8-16 to avoid overhead)
+    # If set to -1, auto-scale to CPU count (capped to avoid overhead)
     if cfg.data.num_workers == -1:
-        cpu_count = os.cpu_count() or 1
-        # Heuristic: usually 4 workers per GPU is sufficient.
-        # Capping at 8 or 12 prevents excessive context switching overhead.
-        cfg.data.num_workers = min(cpu_count, 12)
+        total_cores = os.cpu_count() or 1
+        num_devices = resolve_device_count(cfg)
+        available_cores_per_gpu = max(1, (total_cores - 2) // num_devices)
+        cfg.data.num_workers = min(available_cores_per_gpu, 8)
 
     num_workers = cfg.data.num_workers
 
@@ -82,7 +82,7 @@ def resolve_loader_kwargs(cfg):
         "prefetch_factor": prefetch_factor,
         "persistent_workers": persistent_workers,
         "pin_memory": torch.cuda.is_available(),
-        "drop_last": True,
+        "drop_last": False,
     }
 
 
