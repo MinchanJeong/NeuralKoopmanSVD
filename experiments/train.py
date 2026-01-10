@@ -89,27 +89,33 @@ def resolve_loader_kwargs(cfg):
 # --- Main Training Execution ---
 def main(_):
     cfg = FLAGS.config
+    num_devices = resolve_device_count(cfg)
 
     # 1. Environment Setup
     # DDP-safe run_id generation and directory creation.
     is_ddp = dist.is_available() and dist.is_initialized()
-    run_id = None
 
-    # Rank 0 generates the ID, which is then broadcast to all other processes.
-    if not is_ddp or dist.get_rank() == 0:
-        if FLAGS.run_id:
-            run_id = FLAGS.run_id
+    if num_devices > 1 and (not is_ddp) and (FLAGS.run_id is None):
+        raise ValueError(
+            "Multi-GPU launch without an initialized process group detected. "
+            "Pass --run_id so all spawned ranks share the same run directory."
+        )
+
+    # Determine run_id
+    if FLAGS.run_id is not None:
+        run_id = FLAGS.run_id
+    else:
+        # Single-device or external DDP without provided run_id
+        if not is_ddp:
+            run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         else:
-            # Generate a descriptive run_id using a tag from the config
-            tag = cfg.data.dataset_name if cfg.data.dataset_name else cfg.data.type
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_id = f"{tag}_{timestamp}"
-
-    if is_ddp:
-        # Wrap run_id in a list for broadcast
-        run_id_list = [run_id]
-        dist.broadcast_object_list(run_id_list, src=0)
-        run_id = run_id_list[0]
+            # External DDP: rank0 generates then broadcast
+            run_id = None
+            if dist.get_rank() == 0:
+                run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            obj = [run_id]
+            dist.broadcast_object_list(obj, src=0)
+            run_id = obj[0]
 
     # At this point, all processes have the same run_id.
     # Create directory only on Rank 0.
