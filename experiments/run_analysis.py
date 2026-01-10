@@ -1,4 +1,10 @@
 # experiments/run_analysis.py
+
+import os
+import sys
+
+sys.path.append(os.getcwd())
+
 import logging
 import yaml
 from pathlib import Path
