@@ -68,13 +68,14 @@ class KoopmanScoreMetric(Metric):
            on the current training data,
     """
 
-    # DDP compatible
-    full_state_update = True
+    # We recommend using float64 for numerical stability
+    TORCH_FLOAT_DTYPE: torch.dtype = torch.float64
 
     def __init__(self, feature_dim: int, schatten_norm: int = 2):
         super().__init__()
         self.feature_dim = feature_dim
         self.schatten_norm = schatten_norm
+        _dtype = self.TORCH_FLOAT_DTYPE
 
         # States for accumulation (DDP compatible)
         self.add_state("n_samples", default=torch.tensor(0.0), dist_reduce_fx="sum")
@@ -82,17 +83,17 @@ class KoopmanScoreMetric(Metric):
         # Second Moment Accumulators
         self.add_state(
             "accum_M_f",
-            default=torch.zeros(feature_dim, feature_dim),
+            default=torch.zeros((feature_dim, feature_dim), dtype=_dtype),
             dist_reduce_fx="sum",
         )
         self.add_state(
             "accum_M_g",
-            default=torch.zeros(feature_dim, feature_dim),
+            default=torch.zeros((feature_dim, feature_dim), dtype=_dtype),
             dist_reduce_fx="sum",
         )
         self.add_state(
             "accum_T_fg",
-            default=torch.zeros(feature_dim, feature_dim),
+            default=torch.zeros((feature_dim, feature_dim), dtype=_dtype),
             dist_reduce_fx="sum",
         )
 
@@ -108,6 +109,10 @@ class KoopmanScoreMetric(Metric):
         """
         batch_size = f.shape[0]
         self.n_samples += batch_size
+
+        _dtype = self.TORCH_FLOAT_DTYPE
+        f = f.to(_dtype)
+        g = g.to(_dtype)
 
         # Accumulate Second Moments
         # M_f = \sum f^T f, etc.

@@ -132,7 +132,7 @@ def main(_):
 
     L.seed_everything(cfg.seed)
     # https://docs.pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html#torch.set_float32_matmul_precision
-    torch.set_float32_matmul_precision("medium")
+    # torch.set_float32_matmul_precision("medium") # commented out since speed-up is not meaningful
 
     num_devices = resolve_device_count(cfg)
     global_batch_size = cfg.data.global_batch_size

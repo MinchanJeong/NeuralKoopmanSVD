@@ -34,6 +34,9 @@ class KoopmanEstimator:
         inference methods are added in the future.
     """
 
+    # We recommend using float64 for numerical stability
+    NUMPY_FLOAT_DTYPE: np.dtype = np.float64
+
     def __init__(self, rank: Optional[int] = None, use_cca: bool = True):
         self.rank = rank
         self.use_cca = use_cca
@@ -79,24 +82,26 @@ class KoopmanEstimator:
         self._cca_components = {}
 
     def _init_accum(self, _accum, dim_f, dim_g, dim_x, dim_y):
-        # Helper to initialize zeros
+        _dtype = self.NUMPY_FLOAT_DTYPE
         for key in _accum:
             if key is None:
                 continue
             if "fx" in key or "gx" in key:
                 if dim_x > 0:
-                    _accum[key] = np.zeros((dim_f if "f" in key else dim_g, dim_x))
+                    _accum[key] = np.zeros(
+                        (dim_f if "f" in key else dim_g, dim_x), dtype=_dtype
+                    )
             elif "gy" in key:
                 if dim_y > 0:
-                    _accum[key] = np.zeros((dim_g, dim_y))
+                    _accum[key] = np.zeros((dim_g, dim_y), dtype=_dtype)
             elif "gf" in key:
-                _accum[key] = np.zeros((dim_g, dim_f))
+                _accum[key] = np.zeros((dim_g, dim_f), dtype=_dtype)
             elif "fg" in key:
-                _accum[key] = np.zeros((dim_f, dim_g))
+                _accum[key] = np.zeros((dim_f, dim_g), dtype=_dtype)
             elif "ff" in key or "_f_" in key:
-                _accum[key] = np.zeros((dim_f, dim_f))
+                _accum[key] = np.zeros((dim_f, dim_f), dtype=_dtype)
             elif "gg" in key or "_g_" in key:
-                _accum[key] = np.zeros((dim_g, dim_g))
+                _accum[key] = np.zeros((dim_g, dim_g), dtype=_dtype)
 
     def partial_fit(self, f_t, g_t, f_next, g_next, x_raw=None, y_raw=None):
         """
@@ -114,6 +119,15 @@ class KoopmanEstimator:
             self._init_accum(
                 self._train_accum, f_t.shape[1], g_next.shape[1], dim_x, dim_y
             )
+        _dtype = self.NUMPY_FLOAT_DTYPE
+        f_t = f_t.astype(_dtype)
+        g_t = g_t.astype(_dtype)
+        f_next = f_next.astype(_dtype)
+        g_next = g_next.astype(_dtype)
+        if x_raw is not None:
+            x_raw = x_raw.astype(_dtype)
+        if y_raw is not None:
+            y_raw = y_raw.astype(_dtype)
 
         # 1. Self Covariances
         self._train_accum["M_f_rho0"] += f_t.T @ f_t
@@ -235,6 +249,10 @@ class KoopmanEstimator:
         if self._eval_n == 0:
             self._init_accum(self._eval_accum, f_t.shape[1], g_next.shape[1], 0, 0)
 
+        _dtype = self.NUMPY_FLOAT_DTYPE
+        f_t = f_t.astype(_dtype)
+        g_next = g_next.astype(_dtype)
+
         self._eval_accum["M_f_rho0"] += f_t.T @ f_t
         self._eval_accum["M_g_rho1"] += g_next.T @ g_next
         self._eval_accum["T_fg"] += f_t.T @ g_next
@@ -249,6 +267,7 @@ class KoopmanEstimator:
         if not self.use_cca:
             return {"vamp2": 0.0, "vampe": 0.0}
 
+        _dtype = self.NUMPY_FLOAT_DTYPE
         N = self._eval_n
         # Use accumulated test stats
         cca = linalg.CCAComponents(
@@ -263,9 +282,9 @@ class KoopmanEstimator:
 
         # Calculate scores
         scores = linalg.compute_vamp_scores(
-            self._eval_accum["M_f_rho0"] / N,
-            self._eval_accum["T_fg"] / N,
-            self._eval_accum["M_g_rho1"] / N,
+            self._eval_accum["M_f_rho0"].astype(_dtype) / N,
+            self._eval_accum["T_fg"].astype(_dtype) / N,
+            self._eval_accum["M_g_rho1"].astype(_dtype) / N,
             cca,
         )
         self.reset_eval()
