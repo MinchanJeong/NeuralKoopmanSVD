@@ -180,6 +180,16 @@ def main(_):
 
     pl_module = get_lightning_module(cfg, encoder, lagged_encoder, loss_fn)
 
+    ref_loader_kwargs = loader_kwargs.copy()
+    if "batch_size" not in ref_loader_kwargs:
+        ref_loader_kwargs["batch_size"] = cfg.data.batch_size
+
+    # Pass max_batches through kwargs if config has it
+    if hasattr(cfg.logging, "ref_cca_max_batches"):
+        ref_loader_kwargs["max_batches"] = cfg.logging.ref_cca_max_batches
+
+    pl_module.set_ref_dataset(train_ds, ref_loader_kwargs, collate_fn)
+
     lightning_loggers = []
     csv_logger = CSVLogger(save_dir=str(run_dir), name="logs", version="")
     lightning_loggers.append(csv_logger)
