@@ -239,10 +239,9 @@ def main(_):
 
     checkpoint_last = ModelCheckpoint(
         dirpath=run_dir / "checkpoints",
-        filename="last",
         monitor=None,
         save_top_k=0,
-        save_last=True,
+        save_last=True,  # `filename` is ignored and saves as `last.ckpt`
         auto_insert_metric_name=False,
     )
 
