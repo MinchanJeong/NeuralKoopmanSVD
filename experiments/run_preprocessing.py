@@ -1,4 +1,10 @@
 # experiments/run_preprocessing.py
+
+import os
+import sys
+
+sys.path.append(os.getcwd())
+
 import logging
 from absl import app, flags
 from ml_collections import config_flags
