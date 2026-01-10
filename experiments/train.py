@@ -8,15 +8,13 @@ sys.path.append(os.getcwd())
 import logging
 import datetime
 from pathlib import Path
-import os
-
-import torch
-import torch.distributed as dist
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 
 from absl import app, flags
 from ml_collections import config_flags
+
+import torch
+from torch.utils.data import DataLoader
+import torch.distributed as dist
 
 import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint
@@ -28,9 +26,8 @@ from experiments.factory import (
     get_loss,
     get_lightning_module,
 )
-from koopmansvd.models.inference import KoopmanEstimator
 from koopmansvd.utils import setup_logger, resolve_device_count
-from koopmansvd.data.utils import extract_raw_data
+from experiments.run_post_inference import run_post_training_inference
 
 # --- Configuration ---
 FLAGS = flags.FLAGS
@@ -266,80 +263,10 @@ def main(_):
     trainer.fit(pl_module, train_loader, val_loader)
 
     # 5. Post-Training Inference
-    # Calculate operator statistics on the full training set for stable inference.
-    # Only Rank 0 performs this to avoid redundant computation and file writes.
     if trainer.is_global_zero:
-        logger.info("Running Post-Training Inference to compute Operator Statistics...")
-
-        pl_module.eval()
+        logger.info("Running Post-Training Inference via shared module...")
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        pl_module.to(device)
-
-        # Determine effective rank from config
-        estimator = KoopmanEstimator(rank=cfg.model.n_modes, use_cca=True)
-
-        inference_loader_kwargs = loader_kwargs.copy()
-        inference_loader_kwargs["shuffle"] = False
-        inference_loader_kwargs["drop_last"] = False
-
-        inference_loader = DataLoader(train_ds, **inference_loader_kwargs)
-
-        with torch.no_grad():
-            for batch in tqdm(inference_loader, desc="Estimator Accumulation"):
-                x, y = batch  # x: state(t), y: state(t+1)
-
-                # Move batch to device
-                if isinstance(x, dict):
-                    x = {
-                        k: v.to(device) if isinstance(v, torch.Tensor) else v
-                        for k, v in x.items()
-                    }
-                    y = {
-                        k: v.to(device) if isinstance(v, torch.Tensor) else v
-                        for k, v in y.items()
-                    }
-                else:
-                    x, y = x.to(device), y.to(device)
-
-                # Extract features for current (t) and next (t+1) steps
-                # Both encoder (f) and lagged encoder (g) are needed for EDMD/CCA cross-validation
-                f_t = pl_module(x, lagged=False)
-                g_t = pl_module(x, lagged=True)
-                f_next = pl_module(y, lagged=False)
-                g_next = pl_module(y, lagged=True)
-
-                # Apply learned singular value scaling if applicable
-                if pl_module.svals is not None:
-                    scale = pl_module.svals.view(1, -1).sqrt()
-                    f_t *= scale
-                    g_t *= scale
-                    f_next *= scale
-                    g_next *= scale
-
-                # Extract raw data for projection (decoding)
-                batch_size = f_t.shape[0]
-                x_raw_np = extract_raw_data(x, batch_size)
-                y_raw_np = extract_raw_data(y, batch_size)
-
-                # Accumulate statistics
-                estimator.partial_fit(
-                    f_t=f_t.cpu().numpy(),
-                    g_t=g_t.cpu().numpy(),
-                    f_next=f_next.cpu().numpy(),
-                    g_next=g_next.cpu().numpy(),
-                    x_raw=x_raw_np,
-                    y_raw=y_raw_np,
-                )
-
-        logger.info("Finalizing Koopman Operator...")
-        estimator.finalize()
-
-        # Log top eigenvalues for sanity check
-        logger.info(f"Top 5 Eigenvalues: {estimator.eig()[:5]}")
-
-        save_path = run_dir / "results.npz"
-        estimator.save(save_path)
-        logger.info(f"Results saved to {save_path}")
+        run_post_training_inference(run_dir, device=device)
 
     if is_ddp:
         dist.barrier()
