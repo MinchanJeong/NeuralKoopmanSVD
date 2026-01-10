@@ -72,6 +72,7 @@ You can also run individual steps manually for advanced control.
 
 | Component | Script | Description |
 | :--- | :--- | :--- |
+| **Preprocessing** | `experiments/run_preprocessing.py` | Generates or downloads raw data and converts it into efficient formats for training. |
 | **Training** | `experiments/train.py` | Trains the model and saves the trained Koopman operator statistics (`results.npz`). |
 | **Re-evaluation** | `experiments/run_post_inference.py` | **(Optional)** Reloads a saved checkpoint to regenerate `results.npz`. Useful for re-calculating stats without re-training. |
 | **Analysis** | `experiments/run_analysis.py` | Loads the model and `results.npz` to compute VAMP scores, eigenvalues, and generate plots. |
@@ -94,7 +95,7 @@ We support **Ordered MNIST**, **Chignolin Molecular Dynamics**, and **Synthetic 
 **NOTE: See [`experiments/README.md`](experiments/README.md) for detailed dataset preparation and reproduction instructions.**
 
 
-### Synthetic & MNIST (Auto-generated/downloaded)
+**Synthetic & MNIST (Auto-generated/downloaded)**
 ```bash
 # Ordered MNIST
 ./scripts/run_orderedmnist.sh
@@ -103,7 +104,7 @@ We support **Ordered MNIST**, **Chignolin Molecular Dynamics**, and **Synthetic 
 ./scripts/run_logistic.sh
 ```
 
-### Molecular Dynamics
+**Molecular Dynamics**
 ```bash
 # Chignolin Protein Folding (Requires dataset preparation)
 # See experiments/README.md for download instructions
