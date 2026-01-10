@@ -5,6 +5,21 @@ from numpy.linalg import pinv
 from typing import Tuple, Dict, NamedTuple
 
 
+def _inv_sqrth(M) -> np.ndarray:
+    M_sym = 0.5 * (M + M.T)  # Ensure symmetry
+    w, v = np.linalg.eigh(M_sym)
+
+    # Discard eigenvalues that are effectively noise relative to the signal
+    max_w = np.max(w)
+    threshold = max_w * 1e-7
+
+    # Soft-floor eigenvalues instead of hard-clipping
+    w_inv = np.where(w > threshold, w**-0.5, 0.0)
+
+    inv_sqrt = v @ np.diag(w_inv) @ v.T
+    return inv_sqrt
+
+
 class OperatorStats(NamedTuple):
     r"""
     Container for empirical second-moment matrices defined in Section 2.3.1 of the paper.
@@ -67,18 +82,10 @@ def perform_cca(stats: OperatorStats, epsilon: float = 1e-6) -> CCAComponents:
     See Eq. (6) and surrounding text.
     """
 
-    def _inv_sqrt(M):
-        # Use eigh for stability with symmetric matrices (M is positive semi-definite)
-        w, v = np.linalg.eigh(M)
-        # Clip small eigenvalues for numerical stability
-        w = np.maximum(w, epsilon)
-        inv_sqrt = v @ np.diag(w**-0.5) @ v.T
-        return inv_sqrt
-
     # 1. Compute Inverse Square Roots for Whitening
     # (M_{\rho_0}[f])^{-1/2} and (M_{\rho_1}[g])^{-1/2}
-    M_f_inv_sqrt = _inv_sqrt(stats.M_f)
-    M_g_inv_sqrt = _inv_sqrt(stats.M_g)
+    M_f_inv_sqrt = _inv_sqrth(stats.M_f)
+    M_g_inv_sqrt = _inv_sqrth(stats.M_g)
 
     # 2. Form the whitened joint second moment matrix (Section 3.2.1)
     # T[\tilde{f}, \tilde{g}] = (M_f)^{-1/2} T[f, g] (M_g)^{-1/2}
@@ -88,6 +95,7 @@ def perform_cca(stats: OperatorStats, epsilon: float = 1e-6) -> CCAComponents:
     # T[\tilde{f}, \tilde{g}] = U \Sigma V^T
     U, sigma, Vh = svd(T_tilde)
     V = Vh.T  # numpy returns V^H, we denote V as columns
+    sigma = np.clip(sigma, 0.0, 1.0 - 1e-7)  # Ensure numerical stability
 
     # 4. Compute Alignment Matrices (Eq. 6)
     # The aligned singular functions are \tilde{\phi}(x) = \Sigma^{1/2} U^T \tilde{f}(x)
@@ -157,15 +165,8 @@ def compute_vamp_scores(
     C01_cca = cca.U.T @ M01_w @ cca.V
     C11_cca = cca.V.T @ M11_w @ cca.V
 
-    # --- VAMP-2 Calculation ---
-    # Score = || C00^{-1/2} C01 C11^{-1/2} ||_F^2
-    def _safe_inv_sqrt(M):
-        w, v = np.linalg.eigh(M)
-        w = np.maximum(w, 1e-10)
-        return v @ np.diag(w**-0.5) @ v.T
-
-    inv_sqrt_00 = _safe_inv_sqrt(C00_cca)
-    inv_sqrt_11 = _safe_inv_sqrt(C11_cca)
+    inv_sqrt_00 = _inv_sqrth(C00_cca)
+    inv_sqrt_11 = _inv_sqrth(C11_cca)
 
     M_vamp = inv_sqrt_00 @ C01_cca @ inv_sqrt_11
     vamp2 = np.sum(np.linalg.svd(M_vamp, compute_uv=False) ** 2)
