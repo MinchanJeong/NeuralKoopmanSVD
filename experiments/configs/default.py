@@ -74,7 +74,7 @@ def get_config():
                     # LoRA params
                     "nesting": "jnt",  # 'jnt', 'seq', None
                     # DPLoss / VAMP params
-                    "relaxed": True,
+                    "relaxed": False,
                     "metric_deformation": 0.01,
                     "reg_weight": 0.0,
                     "schatten_norm": 2,
