@@ -58,10 +58,23 @@ This repository is organized to separate the core library from experiment config
 │   ├── pipelines/           # Data preprocessing & Analysis logic
 │   ├── run_preprocessing.py # Data preparation entry point
 │   ├── train.py             # Main training entry point
+│   ├── run_post_inference.py # (Optional) Re-compute operator stats from checkpoint
 │   └── run_analysis.py      # Post-training evaluation & plotting
 │
 └── scripts/                 # Bash scripts for benchmarks (DDP compatible)
 ```
+
+---
+
+## Pipeline Overview
+
+You can also run individual steps manually for advanced control.
+
+| Component | Script | Description |
+| :--- | :--- | :--- |
+| **Training** | `experiments/train.py` | Trains the model and saves the trained Koopman operator statistics (`results.npz`). |
+| **Re-evaluation** | `experiments/run_post_inference.py` | **(Optional)** Reloads a saved checkpoint to regenerate `results.npz`. Useful for re-calculating stats without re-training. |
+| **Analysis** | `experiments/run_analysis.py` | Loads the model and `results.npz` to compute VAMP scores, eigenvalues, and generate plots. |
 
 ---
 
@@ -132,7 +145,19 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python experiments/train.py \
     --config.trainer.strategy="ddp"
 ```
 
-### 4. Experiment Outputs
+### 4. Advanced Configuration
+
+This project uses `ml_collections` for configuration management. You can override any parameter from the command line without modifying the config files.
+
+**Example: Changing Learning Rate and Batch Size**
+```bash
+python experiments/train.py \
+    --config=experiments/configs/mnist_cnn.py \
+    --config.optimization.lr=0.0005 \
+    --config.data.global_batch_size=512
+```
+
+### 5. Experiment Outputs
 
 After running a training script, results are saved in the `results/` directory with the following structure:
 
@@ -147,19 +172,7 @@ results/
         ├── train_log.txt     # Console output log
         └── results.npz       # Learned operators, eigenvalues, and eigenfunctions
 ```
----
 
-## Advanced Configuration
-
-This project uses `ml_collections` for configuration management. You can override any parameter from the command line without modifying the config files.
-
-**Example: Changing Learning Rate and Batch Size**
-```bash
-python experiments/train.py \
-    --config=experiments/configs/mnist_cnn.py \
-    --config.optimization.lr=0.0005 \
-    --config.data.global_batch_size=512
-```
 ---
 
 ## Development & Testing
