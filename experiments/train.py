@@ -134,7 +134,6 @@ def main(_):
     # https://docs.pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html#torch.set_float32_matmul_precision
     # torch.set_float32_matmul_precision("medium") # commented out since speed-up is not meaningful
 
-    num_devices = resolve_device_count(cfg)
     global_batch_size = cfg.data.global_batch_size
     if global_batch_size % num_devices != 0:
         logging.warning(
@@ -210,13 +209,34 @@ def main(_):
             wandb_logger.log_hyperparams(additional_config)
         lightning_loggers.append(wandb_logger)
 
-    checkpoint_callback = ModelCheckpoint(
+    checkpoint_vampe = ModelCheckpoint(
         dirpath=run_dir / "checkpoints",
-        filename="epoch-{epoch:03d}-step-{step}",
-        save_top_k=1,
+        filename="epoch{epoch:03d}-vampe{val/vamp_e:.4f}",
         monitor="val/vamp_e",
         mode="max",
+        save_top_k=1,
+        save_last=False,
+        auto_insert_metric_name=False,
+    )
+
+    # checkpoint_periodic = ModelCheckpoint(
+    #    dirpath=run_dir / "checkpoints",
+    #    filename="epoch{epoch:03d}",
+    #    monitor=None,
+    #    save_top_k=1,
+    #    save_last=False,
+    #    every_n_epochs=5,
+    #   auto_insert_metric_name=False,
+    #   enable_version_counter=False
+    # )
+
+    checkpoint_last = ModelCheckpoint(
+        dirpath=run_dir / "checkpoints",
+        filename="last",
+        monitor=None,
+        save_top_k=0,
         save_last=True,
+        auto_insert_metric_name=False,
     )
 
     # 4. Training
@@ -228,7 +248,7 @@ def main(_):
         check_val_every_n_epoch=cfg.trainer.check_val_every_n_epoch,
         default_root_dir=str(run_dir),
         strategy="ddp" if num_devices > 1 else "auto",
-        callbacks=[checkpoint_callback],
+        callbacks=[checkpoint_vampe, checkpoint_last],
         logger=lightning_loggers,
         log_every_n_steps=cfg.logging.log_every_n_steps,
         sync_batchnorm=(num_devices > 1),
