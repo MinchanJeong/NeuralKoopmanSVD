@@ -7,6 +7,9 @@ if [ -f .env ]; then
     set -a; source .env; set +a
 fi
 
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+
 export PYTHONPATH="${PYTHONPATH}:$PWD"
 
 # Defaults
