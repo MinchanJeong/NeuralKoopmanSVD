@@ -43,6 +43,11 @@ flags.DEFINE_string(
     None,
     "Unique run identifier (e.g., timestamp). Required for DDP consistency.",
 )
+flags.DEFINE_string(
+    "resume_from",
+    None,
+    "Path to a checkpoint to resume training from (e.g., results/.../last.ckpt)",
+)
 
 
 def resolve_loader_kwargs(cfg):
@@ -247,6 +252,7 @@ def main(_):
 
     # 4. Training
     logger.info("Starting Training...")
+
     trainer = L.Trainer(
         max_epochs=cfg.trainer.max_epochs,
         accelerator=cfg.trainer.accelerator,
@@ -259,7 +265,23 @@ def main(_):
         log_every_n_steps=cfg.logging.log_every_n_steps,
         sync_batchnorm=(num_devices > 1),
     )
-    trainer.fit(pl_module, train_loader, val_loader)
+
+    resume_ckpt_path = FLAGS.resume_from
+    if resume_ckpt_path is not None:
+        logger.info(f"Resuming training from checkpoint: {resume_ckpt_path}")
+
+        if is_ddp:
+            logger.warning(
+                "Resuming with DDP. Ensure 'global_batch_size' is compatible with the new num_devices."
+            )
+
+    trainer.fit(
+        pl_module,
+        train_loader,
+        val_loader,
+        ckpt_path=resume_ckpt_path,
+        weights_only=False,
+    )
 
     # 5. Post-Training Inference
     if trainer.is_global_zero:
