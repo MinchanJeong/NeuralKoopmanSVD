@@ -158,6 +158,16 @@ python experiments/train.py \
     --config.data.global_batch_size=512
 ```
 
+**Example: Resuming and Extending Training**
+To continue a previous run (e.g., from 50 to 200 epochs), use the helper script:
+```bash
+# Syntax: <Config> <Previous_Run_Dir> <New_Epochs>
+./scripts/run_continue_training.sh \
+    experiments/configs/chignolin_schnet.py \
+    results/KoopmanSVD/chignolin_run_2025... \
+    200
+```
+
 ### 5. Experiment Outputs
 
 After running a training script, results are saved in the `results/` directory with the following structure:
