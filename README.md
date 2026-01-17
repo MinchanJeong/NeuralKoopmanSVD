@@ -280,7 +280,7 @@ url={https://arxiv.org/abs/2512.21409},
 ```
 
 ## TODO List
-- [ ] Implement `resume_from_checkpoint` logic for long-running experiments (ERA5).
+- [x] Implement `resume_from_checkpoint` logic for long-running experiments (ERA5).
 - [ ] Support ERA5 dataset for global weather/climate applications.
 - [ ] Support D. E. Shaw Research (DESRES) protein folding datasets.
 
