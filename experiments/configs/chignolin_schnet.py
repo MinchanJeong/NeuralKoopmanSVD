@@ -30,6 +30,13 @@ def get_config():
     config.data.global_batch_size = 384
     config.data.time_lag = 1
 
+    # Options: "random", "distribution_matching"
+    # "random" performs a simple random split controlled by the data seed.
+    # "distribution_matching" performs 100 candidate splits and selects the one
+    # that minimizes the Wasserstein distance between the RMSD distributions
+    # of the train and validation sets.
+    config.data.split_strategy = "distribution_matching"
+
     # Model Settings
     config.model.type = "schnet"
     config.model.n_modes = 16
