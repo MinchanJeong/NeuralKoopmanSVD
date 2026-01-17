@@ -9,20 +9,15 @@ from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 import random
 from tqdm import tqdm
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 from torch.utils.data import DataLoader
 
 from .base import BasePipeline
-
-# Import Factory
 from experiments.factory import get_datasets
 
 # Import optional dependencies
 import mdtraj as md
 import ase
 from ase import Atoms
-import dcor
 
 logger = logging.getLogger(__name__)
 
@@ -484,40 +479,17 @@ class ChignolinPipeline(BasePipeline):
             batch_size=self.cfg.data.batch_size,
             num_workers=self.cfg.data.num_workers,
             collate_fn=collate_fn,
+            drop_last=True,
             shuffle=False,
         )
-
-        raw_data_paths = self._run_inference_and_collect_data(
-            pl_module, estimator, val_loader, output_dir, len(val_ds)
-        )
-        analysis_results = self._compute_and_save_analysis(
-            estimator, raw_data_paths, output_dir
-        )
-        self._generate_plots(output_dir, analysis_results)
-
+        self._run_inference_and_collect_data(pl_module, estimator, val_loader)
+        self._compute_and_save_analysis(estimator, output_dir)
         logger.info(f"Analysis complete. Results saved in {output_dir}")
 
-    def _run_inference_and_collect_data(
-        self, pl_module, estimator, loader, output_dir, n_samples
-    ):
+    def _run_inference_and_collect_data(self, pl_module, estimator, loader):
         logger.info("Stage 1: Running inference and collecting raw data...")
         estimator.reset_eval()
         device = pl_module.device
-        target_mode_idx = 1 if self.cfg.model.centering else 0
-
-        phi_path = output_dir / "modes_raw.mmap"
-        rmsd_ca_path = output_dir / "rmsd_ca_raw.mmap"
-        rmsd_nonh_path = output_dir / "rmsd_nonh_raw.mmap"
-
-        phi_mmap = np.memmap(phi_path, dtype=np.float32, mode="w+", shape=(n_samples,))
-        rmsd_ca_mmap = np.memmap(
-            rmsd_ca_path, dtype=np.float32, mode="w+", shape=(n_samples,)
-        )
-        rmsd_nonh_mmap = np.memmap(
-            rmsd_nonh_path, dtype=np.float32, mode="w+", shape=(n_samples,)
-        )
-
-        current_idx = 0
         with torch.no_grad():
             for batch in tqdm(loader, desc="Inference"):
                 x, y = batch
@@ -538,176 +510,9 @@ class ChignolinPipeline(BasePipeline):
 
                 f_np, g_np = f_x.cpu().numpy(), g_y.cpu().numpy()
                 estimator.partial_evaluate(f_np, g_np)
-                phi = f_np @ estimator.alignments["f"].T if estimator.use_cca else f_np
 
-                batch_size = f_np.shape[0]
-                end_idx = current_idx + batch_size
-
-                phi_mmap[current_idx:end_idx] = phi[:, target_mode_idx]
-                rmsd_ca_mmap[current_idx:end_idx] = x["rmsd_ca"].cpu().numpy().flatten()
-                rmsd_nonh_mmap[current_idx:end_idx] = (
-                    x["rmsd_nonh"].cpu().numpy().flatten()
-                )
-                current_idx = end_idx
-
-        phi_mmap.flush()
-        rmsd_ca_mmap.flush()
-        rmsd_nonh_mmap.flush()
-
-        return {"phi": phi_path, "rmsd_ca": rmsd_ca_path, "rmsd_nonh": rmsd_nonh_path}
-
-    def _compute_and_save_analysis(self, estimator, data_paths, output_dir):
+    def _compute_and_save_analysis(self, estimator, output_dir):
         logger.info("Stage 2: Computing and saving analysis metrics...")
-
-        if estimator._eval_n > 0:
-            eval_M_f = estimator._eval_accum["M_f_rho0"] / estimator._eval_n
-            eval_M_g = estimator._eval_accum["M_g_rho1"] / estimator._eval_n
-        else:
-            eval_M_f, eval_M_g = None, None
-
         scores = estimator.evaluate()
-
-        try:
-            eigenvalues = estimator.eig()
-            valid_eigs = np.abs(eigenvalues[np.abs(eigenvalues) > 1e-10])
-            sorted_eigs = np.sort(valid_eigs)[::-1]
-            start_idx = 1 if self.cfg.model.centering else 0
-            target_eigs = sorted_eigs[start_idx:]
-
-            lag_time_ns = 0.1 * self.cfg.data.time_lag
-            timescales = -lag_time_ns / np.log(target_eigs)
-
-            scores.update(
-                {"eigenvalues": target_eigs.tolist(), "timescales": timescales.tolist()}
-            )
-        except Exception as e:
-            logger.warning(f"Timescale computation failed: {e}")
-            timescales, target_eigs = None, None
-
-        phi = np.memmap(data_paths["phi"], dtype=np.float32, mode="r")
-        rmsd_ca = np.memmap(data_paths["rmsd_ca"], dtype=np.float32, mode="r")
-        rmsd_nonh = np.memmap(data_paths["rmsd_nonh"], dtype=np.float32, mode="r")
-
-        dcor_ca = float(dcor.distance_correlation(phi, rmsd_ca))
-        dcor_nonh = float(dcor.distance_correlation(phi, rmsd_nonh))
-        scores.update({"dcor_ca": dcor_ca, "dcor_nonh": dcor_nonh})
-        logger.info(f"DistCorr (Ca): {dcor_ca:.4f}, (Non-H): {dcor_nonh:.4f}")
-
-        train_stats = estimator.stats.get("raw")
-        train_M_f = train_stats.M_f if train_stats else None
-        train_M_g = train_stats.M_g if train_stats else None
-
-        analysis_data = {
-            "eigenvalues": target_eigs,
-            "timescales": timescales,
-            "dcor_ca": dcor_ca,
-            "dcor_nonh": dcor_nonh,
-            "gram_f_train": train_M_f,
-            "gram_g_train": train_M_g,
-            "gram_f_val": eval_M_f,
-            "gram_g_val": eval_M_g,
-        }
-        np.savez(output_dir / "analysis_data.npz", **analysis_data)
         with open(output_dir / "metrics.json", "w") as f:
             json.dump(scores, f, indent=4)
-
-        return analysis_data
-
-    def _generate_plots(self, output_dir, analysis_results):
-        logger.info("Stage 3: Generating plots...")
-
-        if analysis_results["timescales"] is not None:
-            self._plot_timescales(
-                analysis_results["timescales"], output_dir / "timescales.pdf"
-            )
-
-        if (
-            analysis_results["gram_f_train"] is not None
-            and analysis_results["gram_f_val"] is not None
-        ):
-            self._plot_orthogonality(
-                analysis_results["gram_f_train"],
-                analysis_results["gram_g_train"],
-                analysis_results["gram_f_val"],
-                analysis_results["gram_g_val"],
-                output_dir / "orthogonality.pdf",
-            )
-
-        phi = np.memmap(output_dir / "modes_raw.mmap", dtype=np.float32, mode="r")
-        rmsd_ca = np.memmap(output_dir / "rmsd_ca_raw.mmap", dtype=np.float32, mode="r")
-        rmsd_nonh = np.memmap(
-            output_dir / "rmsd_nonh_raw.mmap", dtype=np.float32, mode="r"
-        )
-
-        self._plot_correlation(
-            rmsd_ca, phi, output_dir / "correlation_ca.png", "Ca RMSD vs Mode"
-        )
-        self._plot_correlation(
-            rmsd_nonh, phi, output_dir / "correlation_nonh.png", "Non-H RMSD vs Mode"
-        )
-
-    def _plot_timescales(self, timescales, save_path):
-        fig, ax = plt.subplots(figsize=(5, 4))
-        x = np.arange(1, len(timescales) + 1)
-        ax.plot(
-            x,
-            timescales,
-            "o-",
-            color="tab:blue",
-            linewidth=1.5,
-            markersize=5,
-            label="Ours",
-        )
-        ax.set_title("Estimated Timescale", fontsize=16)
-        ax.set_xlabel("Mode Index", fontsize=13)
-        ax.set_ylabel("Timescale (ns)", fontsize=13)
-        ax.set_yscale("log")
-        ax.set_ylim(0.005, 200)
-        ax.set_xlim(0, 15)
-        ax.grid(True, linestyle="-", alpha=0.8)
-        plt.tight_layout()
-        plt.savefig(save_path)
-        plt.close()
-
-    def _plot_orthogonality(self, M_f_train, M_g_train, M_f_val, M_g_val, save_path):
-        def to_corr(M):
-            d = np.diag(M).copy()
-            d[d < 1e-12] = 1.0
-            D = np.diag(1.0 / np.sqrt(d))
-            return D @ M @ D
-
-        fig = plt.figure(figsize=(7, 6))
-        gs = gridspec.GridSpec(2, 3, width_ratios=[1, 1, 0.08], wspace=0.2, hspace=0.3)
-
-        plot_data = [
-            (M_f_train, r"Train $\mathbf{f}$"),
-            (M_g_train, r"Train $\mathbf{g}$"),
-            (M_f_val, r"Test $\mathbf{f}$"),
-            (M_g_val, r"Test $\mathbf{g}$"),
-        ]
-
-        for i, (M, label) in enumerate(plot_data):
-            row, col = i // 2, i % 2
-            ax = fig.add_subplot(gs[row, col])
-            im = ax.imshow(to_corr(M), cmap="bwr", vmin=-1, vmax=1)
-            ax.set_title(label, fontsize=14)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            if col == 1:
-                plt.colorbar(im, cax=fig.add_subplot(gs[row, 2]))
-
-        plt.suptitle("Orthogonality of Basis Functions", fontsize=16)
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=300)
-        plt.close()
-
-    def _plot_correlation(self, rmsd, phi, save_path, title):
-        plt.figure(figsize=(6, 5))
-        plt.scatter(rmsd, phi, alpha=0.1, s=1, c="tab:blue")
-        plt.xlabel("RMSD (Å)", fontsize=12)
-        plt.ylabel(r"First Non-Trivial Mode ($\phi$)", fontsize=12)
-        plt.title(title, fontsize=14)
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=300)
-        plt.close()
