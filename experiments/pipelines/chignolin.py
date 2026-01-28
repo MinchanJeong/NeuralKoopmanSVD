@@ -27,6 +27,7 @@ class ChignolinPipeline(BasePipeline):
 
     Handles the end-to-end workflow for the high-dimensional molecular dynamics benchmark,
     including MDTraj processing, SchNetPack database creation, and physical validation.
+    Cache Radius of Gyration (ROG) for efficiency during data splitting and analysis.
 
     Attributes:
         UNFOLDED_INDICES (range): File indices for unfolded trajectories (0-16).
@@ -41,7 +42,7 @@ class ChignolinPipeline(BasePipeline):
         self.raw_path = Path(cfg.data.raw_path)
         self.output_dir = Path(cfg.data.dataset_dir)
         self.topology_file = self.raw_path / "protein.gro"
-        self.rmsd_cache_file = self.output_dir / "rmsd_full_cache.npz"
+        self.rog_cache_file = self.output_dir / "rog_full_cache.npz"
 
     # --- Stage 1: Preprocessing --
     def preprocess(self, overwrite: bool = False):
@@ -78,23 +79,23 @@ class ChignolinPipeline(BasePipeline):
 
         all_target_files = sorted(target_unfolded + target_folded)
 
-        # 2. Cache RMSD (For eval and distribution matching)
+        # 2. Cache Radius of Gyration (ROG) (For eval and distribution matching)
         # We perform this if cache is missing OR if we are in distribution_matching mode
         # (to ensure we have data to optimize).
-        rmsd_cache = {}
-        if not self.rmsd_cache_file.exists() or overwrite:
-            self._cache_rmsds(all_target_files)
+        rog_cache = {}
+        if not self.rog_cache_file.exists() or overwrite:
+            self._cache_rogs(all_target_files)
 
         # Load cache into memory to pass to _create_db later
         # (Avoids re-calculation during DB writing)
-        raw_cache = np.load(self.rmsd_cache_file)
-        # Reconstruct dict: {filename: {'rmsd_ca': ..., 'rmsd_nonh': ...}}
+        raw_cache = np.load(self.rog_cache_file)
+        # Reconstruct dict: {filename: {'rog_ca': ...}}
         for key in raw_cache.files:
             # key format: "filename_type" (e.g., "C0.xtc_ca")
             fname, metric = key.rsplit("_", 1)
-            if fname not in rmsd_cache:
-                rmsd_cache[fname] = {}
-            rmsd_cache[fname][f"rmsd_{metric}"] = raw_cache[key]
+            if fname not in rog_cache:
+                rog_cache[fname] = {}
+            rog_cache[fname][f"rog_{metric}"] = raw_cache[key]
 
         # 3. Determine Split (Seed & Files)
         split_strategy = getattr(self.cfg.data, "split_strategy", "random")
@@ -112,7 +113,7 @@ class ChignolinPipeline(BasePipeline):
             best_seed, train_files, val_files = self._find_golden_split(
                 target_unfolded,
                 target_folded,
-                rmsd_cache,
+                rog_cache,
                 target_split_ratio,
                 search_seed,
                 n_trials=100,
@@ -134,7 +135,7 @@ class ChignolinPipeline(BasePipeline):
             train_files = sorted(train_u + train_f)
             val_files = sorted(val_u + val_f)
 
-        # 4. Create DBs (Using Cached RMSD)
+        # 4. Create DBs (Using Cached ROG)
         split_name = f"split_{int(target_split_ratio * 100)}_seed{data_seed}"
         db_base_dir = self.output_dir / split_name
         db_base_dir.mkdir(parents=True, exist_ok=True)
@@ -142,9 +143,9 @@ class ChignolinPipeline(BasePipeline):
         train_db_path = db_base_dir / f"train_{mode}.db"
         val_db_path = db_base_dir / f"val_{mode}.db"
 
-        # Pass rmsd_cache to _create_db to avoid re-calculation
-        self._create_db(train_files, train_db_path, "Train", overwrite, rmsd_cache)
-        self._create_db(val_files, val_db_path, "Validation", overwrite, rmsd_cache)
+        # Pass rog_cache to _create_db to avoid re-calculation
+        self._create_db(train_files, train_db_path, "Train", overwrite, rog_cache)
+        self._create_db(val_files, val_db_path, "Validation", overwrite, rog_cache)
 
         # 4. Save Metadata
         metadata = {
@@ -179,32 +180,29 @@ class ChignolinPipeline(BasePipeline):
         n_train = int(len(shuffled) * ratio)
         return shuffled[:n_train], shuffled[n_train:]
 
-    def _cache_rmsds(self, file_list: List[Path]):
+    def _cache_rogs(self, file_list: List[Path]):
         """
-        Reads all trajectories once and saves BOTH CA and Non-H RMSD.
+        Reads all trajectories once and saves BOTH CA and Non-H ROG.
         """
-        logger.info("Caching RMSD data (CA & Non-H) for efficiency...")
+        logger.info("Caching ROG data (calculated with CA atoms)...")
         topo_data = self._load_topology_indices()
         cache_data = {}
 
-        for traj_path in tqdm(file_list, desc="Caching RMSD"):
-            # Compute both metrics
-            result = self._compute_rmsd_values(traj_path, self.topology_file, topo_data)
+        for traj_path in tqdm(file_list, desc="Caching ROG"):
+            result = self._compute_rog_values(traj_path, self.topology_file, topo_data)
             # Flatten keys for npz saving: "filename_ca"
-            cache_data[f"{traj_path.name}_ca"] = result["rmsd_ca"]
+            cache_data[f"{traj_path.name}_ca"] = result["rog_ca"]
 
-        np.savez(self.rmsd_cache_file, **cache_data)
-        logger.info(f"Full RMSD cache saved to {self.rmsd_cache_file}")
+        np.savez(self.rog_cache_file, **cache_data)
+        logger.info(f"Full ROG cache saved to {self.rog_cache_file}")
 
-    def _compute_rmsd_values(
+    def _compute_rog_values(
         self, traj_path, topology_path, topo_data
     ) -> Dict[str, np.ndarray]:
-        """Computes RMSD."""
-        rmsds_ca = []
-        rmsds_nonh = []
+        """Computes ROG."""
+        rogs_ca = []
 
         ca_idx = topo_data["ca_indices"]
-        nonh_idx = topo_data["non_h_indices"]
         n_atoms = topo_data["n_atoms"]
 
         try:
@@ -214,31 +212,23 @@ class ChignolinPipeline(BasePipeline):
                 xyz_ang = chunk.xyz * 10.0
                 pos_np = xyz_ang.reshape(chunk.n_frames, n_atoms, 3)
 
-                # CA RMSD
+                # CA ROG
                 pos_ca = pos_np[:, ca_idx, :]
                 diff_ca = pos_ca - pos_ca.mean(axis=1, keepdims=True)
-                rmsds_ca.append(np.sqrt(np.mean(np.sum(diff_ca**2, axis=2), axis=1)))
-
-                # Non-H RMSD
-                pos_nonh = pos_np[:, nonh_idx, :]
-                diff_nonh = pos_nonh - pos_nonh.mean(axis=1, keepdims=True)
-                rmsds_nonh.append(
-                    np.sqrt(np.mean(np.sum(diff_nonh**2, axis=2), axis=1))
-                )
+                rogs_ca.append(np.sqrt(np.mean(np.sum(diff_ca**2, axis=2), axis=1)))
 
             return {
-                "rmsd_ca": np.concatenate(rmsds_ca).astype(np.float32),
-                "rmsd_nonh": np.concatenate(rmsds_nonh).astype(np.float32),
+                "rog_ca": np.concatenate(rogs_ca).astype(np.float32),
             }
         except Exception as e:
-            logger.error(f"Error computing RMSD for {traj_path}: {e}")
-            return {"rmsd_ca": np.array([]), "rmsd_nonh": np.array([])}
+            logger.error(f"Error computing ROG for {traj_path}: {e}")
+            return {"rog_ca": np.array([])}
 
     def _find_golden_split(
         self,
         unfolded_files: List[Path],
         folded_files: List[Path],
-        rmsd_cache: Dict,
+        rog_cache: Dict,
         ratio: float,
         seed: int,
         n_trials: int = 100,
@@ -264,12 +254,12 @@ class ChignolinPipeline(BasePipeline):
             val_files = val_u + val_f
 
             try:
-                # Use cached CA RMSD for distribution matching
+                # Use cached CA ROG for distribution matching
                 train_dist = np.concatenate(
-                    [rmsd_cache[f.name]["rmsd_ca"] for f in train_files]
+                    [rog_cache[f.name]["rog_ca"] for f in train_files]
                 )
                 val_dist = np.concatenate(
-                    [rmsd_cache[f.name]["rmsd_ca"] for f in val_files]
+                    [rog_cache[f.name]["rog_ca"] for f in val_files]
                 )
             except KeyError:
                 continue
@@ -308,7 +298,7 @@ class ChignolinPipeline(BasePipeline):
         db_path: Path,
         desc: str,
         overwrite: bool,
-        rmsd_cache: Optional[Dict] = None,
+        rog_cache: Optional[Dict] = None,
     ):
         if not file_list:
             return
@@ -321,7 +311,7 @@ class ChignolinPipeline(BasePipeline):
         logger.info(f"Creating {desc} DB at {db_path}...")
 
         # If cache is not provided, we must load topology to compute
-        topo_data = self._load_topology_indices() if rmsd_cache is None else None
+        topo_data = self._load_topology_indices() if rog_cache is None else None
 
         total_frames = 0
         traj_lengths = []
@@ -329,19 +319,19 @@ class ChignolinPipeline(BasePipeline):
             with ase.db.connect(str(db_path), append=False) as conn:
                 conn.metadata = {
                     "_distance_unit": "Ang",
-                    "_property_unit_dict": {"rmsd_ca": "Ang", "rmsd_nonh": "Ang"},
+                    "_property_unit_dict": {"rog_ca": "Ang"},
                 }
                 for traj_path in tqdm(file_list, desc=f"Writing {desc} DB"):
-                    # Retrieve cached RMSD if available
-                    precomputed_rmsd = (
-                        rmsd_cache.get(traj_path.name) if rmsd_cache else None
+                    # Retrieve cached ROG if available
+                    precomputed_rog = (
+                        rog_cache.get(traj_path.name) if rog_cache else None
                     )
 
                     pairs_list = self._process_single_trajectory(
                         traj_path,
                         self.topology_file,
                         topo_data=topo_data,
-                        precomputed_rmsd=precomputed_rmsd,
+                        precomputed_rog=precomputed_rog,
                     )
 
                     if pairs_list:
@@ -368,7 +358,7 @@ class ChignolinPipeline(BasePipeline):
         topology_path: Path,
         topo_data: Optional[dict] = None,
         chunk_size: int = 1000,
-        precomputed_rmsd: Optional[Dict[str, np.ndarray]] = None,
+        precomputed_rog: Optional[Dict[str, np.ndarray]] = None,
     ) -> List[Tuple["Atoms", dict]]:
         data_pairs = []  # Save (atoms, data_dict) tuple
 
@@ -391,31 +381,19 @@ class ChignolinPipeline(BasePipeline):
 
                 n_frames = chunk.n_frames
 
-                # Get RMSD: Either from Cache or Compute on the fly
-                if precomputed_rmsd is not None:
-                    rmsd_ca_chunk = precomputed_rmsd["rmsd_ca"][
-                        global_frame_idx : global_frame_idx + n_frames
-                    ]
-                    rmsd_nonh_chunk = precomputed_rmsd["rmsd_nonh"][
+                # Get ROG: Either from Cache or Compute on the fly
+                if precomputed_rog is not None:
+                    rog_ca_chunk = precomputed_rog["rog_ca"][
                         global_frame_idx : global_frame_idx + n_frames
                     ]
                 else:
                     # Fallback logic (Only if cache missing)
                     pos_np = xyz_ang.reshape(n_frames, topo_data["n_atoms"], 3)
-                    ca_idx, nonh_idx = (
-                        topo_data["ca_indices"],
-                        topo_data["non_h_indices"],
-                    )
+                    ca_idx = topo_data["ca_indices"]
 
                     pos_ca = pos_np[:, ca_idx, :]
                     diff_ca = pos_ca - pos_ca.mean(axis=1, keepdims=True)
-                    rmsd_ca_chunk = np.sqrt(np.mean(np.sum(diff_ca**2, axis=2), axis=1))
-
-                    pos_nonh = pos_np[:, nonh_idx, :]
-                    diff_nonh = pos_nonh - pos_nonh.mean(axis=1, keepdims=True)
-                    rmsd_nonh_chunk = np.sqrt(
-                        np.mean(np.sum(diff_nonh**2, axis=2), axis=1)
-                    )
+                    rog_ca_chunk = np.sqrt(np.mean(np.sum(diff_ca**2, axis=2), axis=1))
 
                 for i in range(n_frames):
                     atoms = Atoms(
@@ -426,8 +404,7 @@ class ChignolinPipeline(BasePipeline):
                     )
                     # Convert to float32 explicitly
                     extra_data = {
-                        "rmsd_ca": np.array([rmsd_ca_chunk[i]], dtype=np.float32),
-                        "rmsd_nonh": np.array([rmsd_nonh_chunk[i]], dtype=np.float32),
+                        "rog_ca": np.array([rog_ca_chunk[i]], dtype=np.float32)
                     }
                     data_pairs.append((atoms, extra_data))
 
@@ -458,7 +435,7 @@ class ChignolinPipeline(BasePipeline):
         - VAMP-2 / VAMP-E Scores: Measure of operator approximation quality.
         - Relaxation Timescales: Inferred from eigenvalues via t = -lag / ln|lambda|.
         - Distance Correlation: Measures alignment between the first eigenmode
-          and the physical folding reaction coordinate (RMSD).
+          and the physical folding reaction coordinate.
 
         Args:
             run_dir (Path): Path to the experiment results.
