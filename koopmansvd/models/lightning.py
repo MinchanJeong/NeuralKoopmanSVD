@@ -110,13 +110,11 @@ class KoopmanPLModule(L.LightningModule):
     def _assemble_global_batch(self, f_x, g_y, world_size, global_rank):
         """Scale local features by sqrt(svals), then all-gather into the global batch.
 
-        The svals scaling is applied to the LOCAL (differentiable) slice *before* the
-        all-gather, and only that slice stays differentiable (the SimCLR trick). This
-        keeps the svals gradient flowing through the local batch only -- consistent with
-        the encoder gradient under DDP's mean-reduce plus the world_size loss scaling.
-        If the scaling instead happened inside loss_fn on the gathered batch, every rank
-        would compute the full global-batch svals gradient and it would be inflated by
-        world_size. The caller passes svals=None to loss_fn. Returns (f_global, g_global).
+        Only the local slice stays differentiable (the SimCLR trick), and svals are
+        applied to it *before* gathering so the svals gradient flows through the local
+        batch only -- consistent with the encoder under DDP's mean-reduce + world_size
+        loss scaling. (Scaling inside loss_fn on the gathered batch would inflate the
+        svals gradient by world_size.) Caller passes svals=None to loss_fn.
         """
         svals = self.svals
         if svals is not None:
@@ -160,13 +158,8 @@ class KoopmanPLModule(L.LightningModule):
         batch_size = f_x.shape[0]
 
         if self.trainer.world_size > 1:
-            # < Efficient Differentiable All-Gather (the SimCLR trick) >
-            # Covariance-based losses (LoRA, VAMP, DPNet) need the *global* batch, but
-            # their gradient w.r.t. local samples depends only on the local slice. So we
-            # all-gather detached copies and re-attach the local differentiable slice,
-            # avoiding a redundant gradient all-to-all. The sqrt(svals) scaling is applied
-            # to the local slice before gathering (see _assemble_global_batch) so the
-            # svals gradient stays consistent with the encoder under DDP's mean-reduce.
+            # Covariance losses (LoRA/VAMP/DPNet) need the global batch; gather it
+            # keeping only the local slice differentiable (see _assemble_global_batch).
             f_x_global, g_y_global = self._assemble_global_batch(
                 f_x, g_y, self.trainer.world_size, self.trainer.global_rank
             )
