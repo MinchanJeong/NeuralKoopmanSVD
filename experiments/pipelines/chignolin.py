@@ -88,14 +88,14 @@ class ChignolinPipeline(BasePipeline):
 
         # Load cache into memory to pass to _create_db later
         # (Avoids re-calculation during DB writing)
-        raw_cache = np.load(self.rog_cache_file)
-        # Reconstruct dict: {filename: {'rog_ca': ...}}
-        for key in raw_cache.files:
-            # key format: "filename_type" (e.g., "C0.xtc_ca")
-            fname, metric = key.rsplit("_", 1)
-            if fname not in rog_cache:
-                rog_cache[fname] = {}
-            rog_cache[fname][f"rog_{metric}"] = raw_cache[key]
+        with np.load(self.rog_cache_file) as raw_cache:
+            # Reconstruct dict: {filename: {'rog_ca': ...}}
+            for key in raw_cache.files:
+                # key format: "filename_type" (e.g., "C0.xtc_ca")
+                fname, metric = key.rsplit("_", 1)
+                if fname not in rog_cache:
+                    rog_cache[fname] = {}
+                rog_cache[fname][f"rog_{metric}"] = raw_cache[key]
 
         # 3. Determine Split (Seed & Files)
         split_strategy = getattr(self.cfg.data, "split_strategy", "random")
@@ -244,7 +244,7 @@ class ChignolinPipeline(BasePipeline):
 
         rng = random.Random(seed)
         # 0 is included to check the default case
-        candidate_seeds = [0] + rng.sample(range(1, 100000), n_trials)
+        candidate_seeds = [0] + rng.sample(range(1, 100000), max(0, n_trials - 1))
 
         for current_seed in tqdm(candidate_seeds, desc="Optimizing Split"):
             train_u, val_u = self._split_files(unfolded_files, ratio, current_seed)
@@ -456,7 +456,7 @@ class ChignolinPipeline(BasePipeline):
             batch_size=self.cfg.data.batch_size,
             num_workers=self.cfg.data.num_workers,
             collate_fn=collate_fn,
-            drop_last=True,
+            drop_last=False,
             shuffle=False,
         )
         self._run_inference_and_collect_data(pl_module, estimator, val_loader)
