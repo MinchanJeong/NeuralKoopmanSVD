@@ -148,25 +148,45 @@ class KoopmanPLModule(L.LightningModule):
             eliminating massive redundant gradient communication.
             """
 
+            # 0. Apply the learned singular-value scaling to the LOCAL features
+            # *before* gathering. svals multiply every slice of the global batch, so if
+            # the scaling happened inside loss_fn the svals gradient would be the full
+            # global-batch gradient on *every* rank. After DDP's mean-reduce and the
+            # `* world_size` correction below, that would inflate the svals gradient by a
+            # factor of world_size relative to the encoder gradient. Scaling the local
+            # (differentiable) slice here keeps svals consistent with the encoder: their
+            # gradient flows only through the local batch. (Local single-GPU path below
+            # is numerically unchanged.)
+            svals = self.svals
+            if svals is not None:
+                s = svals.view(1, -1).sqrt()
+                f_local, g_local = f_x * s, g_y * s
+            else:
+                f_local, g_local = f_x, g_y
+
             # 1. Create placeholders
-            f_gathered = [torch.zeros_like(f_x) for _ in range(self.trainer.world_size)]
-            g_gathered = [torch.zeros_like(g_y) for _ in range(self.trainer.world_size)]
+            f_gathered = [
+                torch.zeros_like(f_local) for _ in range(self.trainer.world_size)
+            ]
+            g_gathered = [
+                torch.zeros_like(g_local) for _ in range(self.trainer.world_size)
+            ]
 
             # 2. Collect values (No gradient flow here)
-            dist.all_gather(f_gathered, f_x)
-            dist.all_gather(g_gathered, g_y)
+            dist.all_gather(f_gathered, f_local)
+            dist.all_gather(g_gathered, g_local)
 
             # 3. Inject local differentiable tensors into the gathered list
             # This attaches the current GPU's computational graph to the global batch container.
-            f_gathered[self.trainer.global_rank] = f_x
-            g_gathered[self.trainer.global_rank] = g_y
+            f_gathered[self.trainer.global_rank] = f_local
+            g_gathered[self.trainer.global_rank] = g_local
 
             # 4. Form the global batch
             f_x_global = torch.cat(f_gathered, dim=0)
             g_y_global = torch.cat(g_gathered, dim=0)
 
-            # Calculate loss on the global batch
-            loss_val = self.loss_fn(f_x_global, g_y_global, svals=self.svals)
+            # Calculate loss on the global batch (svals already applied above)
+            loss_val = self.loss_fn(f_x_global, g_y_global, svals=None)
             # Scale loss by world size to account for gradient accumulation
             loss = loss_val * self.trainer.world_size
             batch_size *= self.trainer.world_size
