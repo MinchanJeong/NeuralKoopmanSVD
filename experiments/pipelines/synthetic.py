@@ -46,8 +46,9 @@ class SyntheticPipeline(BasePipeline):
 
         x0_dim = 1 if self.dataset_name in ["logistic"] else 3
 
-        # Initialize state (random)
-        x0 = np.random.randn(x0_dim)
+        # Initialize state (random, seeded for reproducibility)
+        rng = np.random.default_rng(self.cfg.data.seed)
+        x0 = rng.standard_normal(x0_dim)
 
         # Generate data
         traj = generator.sample(x0, T=n_samples)
