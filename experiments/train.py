@@ -208,7 +208,7 @@ def main(_):
         wandb_logger = WandbLogger(
             project=cfg.logging.wandb_project,
             entity=cfg.logging.wandb_entity,
-            name=FLAGS.run_id,  # Use the generated run_id
+            name=run_id,  # Use the resolved run_id (FLAGS.run_id may be None on auto)
             config=cfg.to_dict(),
             save_dir=str(run_dir),
         )
