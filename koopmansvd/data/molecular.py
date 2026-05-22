@@ -252,9 +252,9 @@ class MolecularContextDataset(BaseContextDataset):
             )
             with ase.db.connect(str(self.db_path)) as conn:
                 raw_len = len(conn)
-                self.len_ = max(0, raw_len - (1 + self.time_lag) + 1)
+                self._len = max(0, raw_len - (1 + self.time_lag) + 1)
 
-            self.valid_indices = np.arange(self.len_)
+            self.valid_indices = np.arange(self._len)
         else:
             with open(info_path, "r") as f:
                 traj_lengths = json.load(f)["traj_lengths"]
