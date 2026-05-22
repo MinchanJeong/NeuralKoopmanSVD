@@ -101,8 +101,8 @@ class BasePipeline(ABC):
             model.to(device)
             model.eval()
 
-        except Exception as e:
-            logger.error(f"Failed to load PLModule: {e}")
+        except Exception:
+            logger.exception("Failed to load PLModule")
             return None, None
 
         # 4. Load Estimator (Full Restore)
@@ -126,6 +126,6 @@ class BasePipeline(ABC):
             logger.info("Restored KoopmanEstimator from results.npz")
             return model, estimator
 
-        except Exception as e:
-            logger.error(f"Failed to load estimator: {e}")
+        except Exception:
+            logger.exception("Failed to load estimator")
             return model, None

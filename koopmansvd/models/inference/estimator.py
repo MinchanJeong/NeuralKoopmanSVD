@@ -44,7 +44,6 @@ class KoopmanEstimator:
         self._train_n = 0
 
         # --- Training Accumulators (Full Batch Stats) ---
-        self._train_n = 0
         self._train_accum = {
             # Self-Covariances
             "M_f_rho0": None,  # E[f_t f_t^T]
@@ -333,7 +332,7 @@ class KoopmanEstimator:
 
         # ---------------------------------------------------------
         # Approach 2: EDMD (Raw / Legacy)
-        # --------------------------------------------- dd------------
+        # ---------------------------------------------------------
         if mode == "raw":
             if basis not in ["f", "g"]:
                 raise ValueError("Basis must be 'f' or 'g'")
