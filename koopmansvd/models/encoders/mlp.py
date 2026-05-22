@@ -27,13 +27,15 @@ class MLPEncoder(BaseEncoder):
                 )
         elif isinstance(activation, type) and issubclass(activation, nn.Module):
             act_layer_cls = activation
-        else:
+        elif isinstance(activation, nn.Module):
+            # A pre-built module instance: reuse it for every activation layer.
+            _act_instance = activation
 
-            def act_layer_cls(activation):
-                if isinstance(activation, nn.Module):
-                    return activation
-                else:
-                    return activation()
+            def act_layer_cls():
+                return _act_instance
+        else:
+            # Any other zero-arg callable returning a module.
+            act_layer_cls = activation
 
         layers = []
         curr_dim = input_dim
