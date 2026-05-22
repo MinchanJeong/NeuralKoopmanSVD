@@ -20,7 +20,7 @@ class DataLoaders:
                 data = np.load(path, mmap_mode="r")
                 logger.info(f"Loaded {path} with mmap_mode='r'. Shape: {data.shape}")
                 return data
-            except ValueError:
+            except (ValueError, OSError):
                 logger.warning(f"Could not mmap {path}. Falling back to full load.")
 
         return np.load(path)

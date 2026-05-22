@@ -61,11 +61,6 @@ class TensorContextDataset(BaseContextDataset):
         # 2. Build Index Mapping
         self.window_span = 1 + time_lag
 
-        self.traj_lengths = [len(t) for t in self.trajectories]
-        self.valid_windows_per_traj = [
-            max(0, length - self.window_span + 1) for length in self.traj_lengths
-        ]
-
         # Accessing len() on mmap/zarr is efficient (reads metadata only)
         self.traj_lengths = [len(t) for t in self.trajectories]
         self.valid_windows_per_traj = [
@@ -75,7 +70,7 @@ class TensorContextDataset(BaseContextDataset):
         # Cumulative sum for fast indexing
         self.cumulative_indices = np.cumsum(self.valid_windows_per_traj)
         if len(self.cumulative_indices) > 0:
-            self.total_windows = self.cumulative_indices[-1]
+            self.total_windows = int(self.cumulative_indices[-1])
         else:
             self.total_windows = 0
 

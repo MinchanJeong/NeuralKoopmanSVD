@@ -25,6 +25,9 @@ flags.DEFINE_string(
 
 
 def main(_):
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
     if not FLAGS.run_dir:
         raise ValueError(
             "Flag --run_dir must be specified (e.g., results/project/timestamp)."
@@ -39,14 +42,11 @@ def main(_):
             f"config.yaml not found in {run_path}. Cannot reproduce analysis."
         )
 
-    logging.info(f"Loading configuration from {config_path}...")
+    logger.info(f"Loading configuration from {config_path}...")
     with open(config_path, "r") as f:
         # Restore yaml dict to ConfigDict
         cfg_dict = yaml.unsafe_load(f)
         cfg = ConfigDict(cfg_dict)
-
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__name__)
 
     # 2. Initialize Pipeline with Restored Config
     pipeline = get_pipeline(cfg)

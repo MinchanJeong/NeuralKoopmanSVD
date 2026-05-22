@@ -1,6 +1,7 @@
 # koopmansvd/datasets/logistic.py
 import numpy as np
 import scipy.integrate
+import scipy.linalg
 import scipy.special
 from scipy.stats.sampling import NumericalInversePolynomial
 from typing import Optional
