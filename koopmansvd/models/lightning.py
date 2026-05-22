@@ -107,6 +107,34 @@ class KoopmanPLModule(L.LightningModule):
         enc = self.lagged_encoder if lagged else self.encoder
         return enc(x)
 
+    def _assemble_global_batch(self, f_x, g_y, world_size, global_rank):
+        """Scale local features by sqrt(svals), then all-gather into the global batch.
+
+        The svals scaling is applied to the LOCAL (differentiable) slice *before* the
+        all-gather, and only that slice stays differentiable (the SimCLR trick). This
+        keeps the svals gradient flowing through the local batch only -- consistent with
+        the encoder gradient under DDP's mean-reduce plus the world_size loss scaling.
+        If the scaling instead happened inside loss_fn on the gathered batch, every rank
+        would compute the full global-batch svals gradient and it would be inflated by
+        world_size. The caller passes svals=None to loss_fn. Returns (f_global, g_global).
+        """
+        svals = self.svals
+        if svals is not None:
+            s = svals.view(1, -1).sqrt()
+            f_local, g_local = f_x * s, g_y * s
+        else:
+            f_local, g_local = f_x, g_y
+
+        f_gathered = [torch.zeros_like(f_local) for _ in range(world_size)]
+        g_gathered = [torch.zeros_like(g_local) for _ in range(world_size)]
+        dist.all_gather(f_gathered, f_local)
+        dist.all_gather(g_gathered, g_local)
+
+        # Re-attach the local computational graph (the gathered copies are detached).
+        f_gathered[global_rank] = f_local
+        g_gathered[global_rank] = g_local
+        return torch.cat(f_gathered, dim=0), torch.cat(g_gathered, dim=0)
+
     def training_step(self, batch, batch_idx):
         """
         Executes a single training step.
@@ -132,62 +160,20 @@ class KoopmanPLModule(L.LightningModule):
         batch_size = f_x.shape[0]
 
         if self.trainer.world_size > 1:
-            """
-            < Efficient Differentiable All-Gather >
+            # < Efficient Differentiable All-Gather (the SimCLR trick) >
+            # Covariance-based losses (LoRA, VAMP, DPNet) need the *global* batch, but
+            # their gradient w.r.t. local samples depends only on the local slice. So we
+            # all-gather detached copies and re-attach the local differentiable slice,
+            # avoiding a redundant gradient all-to-all. The sqrt(svals) scaling is applied
+            # to the local slice before gathering (see _assemble_global_batch) so the
+            # svals gradient stays consistent with the encoder under DDP's mean-reduce.
+            f_x_global, g_y_global = self._assemble_global_batch(
+                f_x, g_y, self.trainer.world_size, self.trainer.global_rank
+            )
 
-            - Problem with `nn.functional.all_gather`:
-            It maintains the computational graph for ALL gathered tensors. During backward(),
-            it triggers an all-to-all communication to synchronize gradients for remote samples.
-            However, for covariance-based losses (VAMP, LoRA), the gradient of the loss
-            with respect to local samples depends only on the local batch.
-
-            - Solution (The SimCLR Trick):
-            1. Gather raw data without gradients (stop-gradient).
-            2. Manually overwrite the current rank's slice with the local differentiable tensor.
-            This forces the autograd engine to backpropagate ONLY through the local batch,
-            eliminating massive redundant gradient communication.
-            """
-
-            # 0. Apply the learned singular-value scaling to the LOCAL features
-            # *before* gathering. svals multiply every slice of the global batch, so if
-            # the scaling happened inside loss_fn the svals gradient would be the full
-            # global-batch gradient on *every* rank. After DDP's mean-reduce and the
-            # `* world_size` correction below, that would inflate the svals gradient by a
-            # factor of world_size relative to the encoder gradient. Scaling the local
-            # (differentiable) slice here keeps svals consistent with the encoder: their
-            # gradient flows only through the local batch. (Local single-GPU path below
-            # is numerically unchanged.)
-            svals = self.svals
-            if svals is not None:
-                s = svals.view(1, -1).sqrt()
-                f_local, g_local = f_x * s, g_y * s
-            else:
-                f_local, g_local = f_x, g_y
-
-            # 1. Create placeholders
-            f_gathered = [
-                torch.zeros_like(f_local) for _ in range(self.trainer.world_size)
-            ]
-            g_gathered = [
-                torch.zeros_like(g_local) for _ in range(self.trainer.world_size)
-            ]
-
-            # 2. Collect values (No gradient flow here)
-            dist.all_gather(f_gathered, f_local)
-            dist.all_gather(g_gathered, g_local)
-
-            # 3. Inject local differentiable tensors into the gathered list
-            # This attaches the current GPU's computational graph to the global batch container.
-            f_gathered[self.trainer.global_rank] = f_local
-            g_gathered[self.trainer.global_rank] = g_local
-
-            # 4. Form the global batch
-            f_x_global = torch.cat(f_gathered, dim=0)
-            g_y_global = torch.cat(g_gathered, dim=0)
-
-            # Calculate loss on the global batch (svals already applied above)
+            # svals already applied to the features above -> pass svals=None.
             loss_val = self.loss_fn(f_x_global, g_y_global, svals=None)
-            # Scale loss by world size to account for gradient accumulation
+            # Scale loss by world size to account for DDP's gradient mean-reduce.
             loss = loss_val * self.trainer.world_size
             batch_size *= self.trainer.world_size
         else:
